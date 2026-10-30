@@ -2,6 +2,14 @@
 
 Run your GitHub Actions jobs on your own machine **when you want**, automatically, and fall back to GitHub-hosted runners when you don't.
 
+**In one line:** a self-hosted runner with automatic fallback to GitHub-hosted runners, plus a tray app (Windows; Linux next) that runs CI on your PC when it is idle, asks you when you are using it, and never strands a job in the queue.
+
+Use it if you want to:
+- use your laptop or desktop as a GitHub Actions runner without jobs getting stuck when it is off, asleep or busy;
+- save GitHub Actions minutes on private repositories (Windows minutes count double);
+- get "self-hosted runner, otherwise `ubuntu-latest`/`windows-latest`" in `runs-on`, which GitHub does not offer natively;
+- run CI on your own PC at the lowest priority, with a CPU cap, so it never slows you down.
+
 > Status: v0.1.3, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
@@ -79,6 +87,23 @@ The route step must see whether your runner is online, and GitHub's built-in `GI
 ## Security
 
 A self-hosted runner executes whatever the workflow says, with your user's permissions. Use it **only on repositories you trust**, keep "Run workflows from fork pull requests" off, and never on public repositories that accept outside PRs. See GitHub's [security hardening guide](https://docs.github.com/actions/security-guides/security-hardening-for-github-actions#hardening-for-self-hosted-runners).
+
+## FAQ
+
+**Can `runs-on` fall back to a GitHub-hosted runner when my self-hosted runner is offline?**
+Not by itself: a list in `runs-on` means all labels (AND), and a job for an offline runner waits up to 24 h. The route step in this repository checks your runner first and outputs either it or the fallback, as in the example above.
+
+**How is this different from `runner-fallback-action`?**
+Those actions check once whether the runner is online. Here a tray agent also decides whether the runner should be online (idle, in use, battery, your answer), and the route step waits for your answer.
+
+**Does it slow down my PC while I work?**
+In Automatic mode it asks first. Jobs always run at the Idle priority class, with an optional hard CPU cap.
+
+**Does it work on Linux or macOS?**
+Windows today; Linux is the next target. The route step runs on any GitHub-hosted runner.
+
+**Is it safe for public repositories?**
+Only if no outside pull request can run workflows on it. See Security.
 
 ## License
 

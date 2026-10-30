@@ -3,8 +3,11 @@ name = "switchable-ci-runner"
 version = "0.1.3"
 edition = "2024"
 license = "MIT"
-description = "Tray agent that runs your GitHub Actions self-hosted runner only when your machine is idle."
+description = "Use your own PC as a GitHub Actions self-hosted runner when it suits you, with automatic fallback to GitHub-hosted runners: a tray app that asks before running jobs while you work."
 repository = "https://github.com/dumaat/switchable-ci-runner"
+readme = "README.md"
+keywords = ["github-actions", "self-hosted-runner", "ci", "runner-fallback", "tray"]
+categories = ["development-tools", "development-tools::build-utils"]
 
 [dependencies]
 serde = { version = "1", features = ["derive"] }
