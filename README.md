@@ -2,7 +2,7 @@
 
 Run your GitHub Actions jobs on your own machine **when you want**, automatically, and fall back to GitHub-hosted runners when you don't.
 
-> Status: v0.1.2, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
+> Status: v0.1.3, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
 
@@ -10,7 +10,19 @@ Run your GitHub Actions jobs on your own machine **when you want**, automaticall
 2. Download `switchable-ci-runner.exe` from the [latest release](https://github.com/dumaat/switchable-ci-runner/releases/latest) and double-click it (**not** "Run as administrator").
 3. Type the repository (`owner/name`). It downloads the official GitHub runner, checks its SHA-256, registers it with the label `switchable`, starts with Windows, and a message says it is installed and where to find it.
 
-The icon sits in the tray (bottom right). Its menu: **Automatic** (idle: run; in use: ask), **Always** (run every job), **Disabled**, **On battery, send jobs to GitHub**, **Set CI token (PAT)…** (saved as the repo secret `RUNNER_STATUS_TOKEN` through `gh`, not kept on the PC), **Quit**. To update, run a newer .exe: it replaces the installed one. Files and logs: `%LOCALAPPDATA%\switchable-ci-runner`. Uninstall: `scripts\uninstall-windows.ps1 -Repo owner/name`.
+The icon sits in the tray (bottom right; click the ^ arrow if it is hidden). Its menu:
+
+| Item | What it does |
+|---|---|
+| **Automatic** / **Always** / **Disabled** | The mode (table below). |
+| **On battery, send jobs to GitHub** | On battery, jobs go to GitHub in any mode. |
+| **CPU limit** → 25 / 50 / 75 / 100% | Hard cap on the CPU the runner and everything a job starts can use. Applies from the next runner start, never mid-job. |
+| **Set CI token (PAT)…** | Saves the token the route step needs (below). |
+| **Quit** | Stops the runner and the agent until the next logon. |
+
+CI jobs **always run at the lowest Windows priority** ("Idle"): whatever you are doing comes first, and when the PC is idle the CI still gets the whole CPU. The CPU limit is an extra, hard cap on top.
+
+Settings: `%APPDATA%\switchable-ci-runner\config.json`. Files and logs: `%LOCALAPPDATA%\switchable-ci-runner`. To update, run a newer .exe: it replaces the installed one and keeps your settings and runner. Uninstall: `scripts\uninstall-windows.ps1 -Repo owner/name`.
 
 ## Why
 
@@ -43,10 +55,12 @@ jobs:
       runner: ${{ steps.route.outputs.runner }}
     steps:
       - id: route
-        uses: dumaat/switchable-ci-runner@v0.1.2
+        uses: dumaat/switchable-ci-runner@v0.1.3
         with:
           token: ${{ secrets.RUNNER_STATUS_TOKEN }}   # can list the repo's runners
           fallback: '"windows-latest"'
+          # label: switchable      # the label your runner was registered with
+          # wait-seconds: 90       # how long to wait for your answer
   build:
     needs: route
     runs-on: ${{ fromJSON(needs.route.outputs.runner) }}

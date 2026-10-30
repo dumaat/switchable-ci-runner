@@ -3,6 +3,7 @@
 
 mod ask;
 mod install;
+mod job;
 mod pat;
 mod runner;
 mod sys;
@@ -85,7 +86,7 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
     let log = |line: &str| append_log(&paths.agent_log, line);
     log("agent started");
 
-    let tray = Tray::new(config.mode, config.battery_sends_to_github)?;
+    let tray = Tray::new(&config)?;
     let repo = install::runner_repo(&config.runner_dir);
     if just_installed {
         tray::notify(
@@ -117,6 +118,7 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
             match action {
                 Action::SetMode(mode) => config.mode = mode,
                 Action::SetBatterySendsToGithub(on) => config.battery_sends_to_github = on,
+                Action::SetCpuLimit(percent) => config.cpu_limit_percent = percent,
                 Action::SetPat => {
                     set_pat_in_background(asking.repo.clone());
                     continue;
@@ -201,7 +203,7 @@ fn tick(
         asking.answer = Some(ask::ask(repo));
     }
     match (wanted, alive) {
-        (Wanted::Online, false) => match runner.start() {
+        (Wanted::Online, false) => match runner.start(config.cpu_limit_percent) {
             Ok(()) => log(&format!("runner started ({reason:?})")),
             Err(e) => {
                 log(&e);

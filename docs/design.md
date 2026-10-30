@@ -15,8 +15,9 @@ GitHub-hosted runners can be slow for heavy builds, and a plain self-hosted runn
 ## The pieces
 
 1. **Route step** (`action.yml`), on `ubuntu-latest`: polls the runners API for up to `wait-seconds`; outputs `["self-hosted", label]` if a matching runner is online and free, the fallback otherwise.
-2. **Tray agent**: every 5 s reads idle time and power, decides (a pure function, `src/decision.rs`), and starts or stops the official runner. It stops it with Ctrl+C so GitHub sees it go offline at once, never mid-job, and keeps the PC awake only while a job runs.
-3. **The question**: while the owner uses the PC, the agent lists the repository's active runs with the owner's `gh`; a new one opens a 45 s message box. Yes brings the runner online for 10 minutes; no or no answer leaves it offline, and the route step falls back.
+2. **Tray agent**: every 5 s reads idle time and power, decides (a pure function, `src/decision.rs`), and starts or stops the official runner. It stops it with Ctrl+C so GitHub sees it go offline at once, never mid-job, and keeps the PC awake only while a job runs. Modes: Automatic (idle: run; in use: ask), Always (run everything), Disabled; an option sends everything to GitHub on battery.
+3. **Priority and CPU cap**: the runner starts inside a Windows job object. Every process a CI job starts joins it, gets the Idle priority class (the lowest), and, if the owner picked one, a hard CPU cap (`JOB_OBJECT_CPU_RATE_CONTROL_HARD_CAP`). Closing the job kills whatever a job left behind. Priority covers the CPU only, not disk or memory.
+4. **The question**: while the owner uses the PC, the agent lists the repository's active runs with the owner's `gh`; a new one opens a 45 s message box. Yes brings the runner online for up to 10 minutes; no or no answer leaves it offline, and the route step falls back.
 
 ## Alternatives considered
 

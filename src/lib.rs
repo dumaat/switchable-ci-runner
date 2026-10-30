@@ -2,4 +2,5 @@
 //! The tray, the idle and power readings and the runner process live in the binary.
 
 pub mod config;
+pub mod cpu;
 pub mod decision;

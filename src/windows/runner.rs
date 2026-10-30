@@ -4,6 +4,7 @@
 //! GitHub it is going offline. Killing it instead would leave it "online" on
 //! GitHub for a while, and a job routed to it then would sit in the queue.
 
+use super::job::Job;
 use std::fs::OpenOptions;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -13,7 +14,7 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::System::Console::{
     AttachConsole, CTRL_C_EVENT, FreeConsole, GenerateConsoleCtrlEvent, SetConsoleCtrlHandler,
 };
-use windows_sys::Win32::System::Threading::CREATE_NO_WINDOW;
+use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, IDLE_PRIORITY_CLASS};
 
 /// How long a graceful stop may take before the runner is killed.
 const STOP_GRACE: Duration = Duration::from_secs(30);
@@ -22,6 +23,8 @@ pub struct Runner {
     dir: PathBuf,
     log: PathBuf,
     child: Option<Child>,
+    // Dropped after the runner stops: closing it kills anything a job left behind.
+    job: Option<Job>,
 }
 
 impl Runner {
@@ -30,6 +33,7 @@ impl Runner {
             dir,
             log,
             child: None,
+            job: None,
         }
     }
 
@@ -53,7 +57,9 @@ impl Runner {
         }
     }
 
-    pub fn start(&mut self) -> Result<(), String> {
+    /// Starts the runner at the lowest priority, with an optional hard CPU cap.
+    /// A new cap applies from the next start, never in the middle of a job.
+    pub fn start(&mut self, cpu_limit_percent: u8) -> Result<(), String> {
         if self.is_alive() {
             return Ok(());
         }
@@ -69,17 +75,28 @@ impl Runner {
             .arg("run")
             .current_dir(&self.dir)
             // A console with no window: invisible, but Ctrl+C can still reach it.
-            .creation_flags(CREATE_NO_WINDOW)
+            .creation_flags(CREATE_NO_WINDOW | IDLE_PRIORITY_CLASS)
             .stdin(Stdio::null())
             .stdout(log)
             .stderr(err)
             .spawn()
             .map_err(|e| format!("cannot start {}: {e}", self.listener().display()))?;
+        let job = Job::new(cpu_limit_percent)?;
+        if let Err(e) = job.assign(&child) {
+            let mut child = child;
+            let _ = child.kill();
+            let _ = child.wait();
+            return Err(e);
+        }
         self.child = Some(child);
+        self.job = Some(job);
         Ok(())
     }
 
     pub fn stop(&mut self) {
+        // Held until this function returns, after the runner has exited: then the
+        // job closes and kills anything a CI job left running.
+        let _job = self.job.take();
         let Some(mut child) = self.child.take() else {
             return;
         };

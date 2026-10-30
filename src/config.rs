@@ -11,6 +11,8 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub mode: Mode,
     pub battery_sends_to_github: bool,
+    /// Hard CPU cap for the runner and everything a job starts, in percent; 100 = none.
+    pub cpu_limit_percent: u8,
     /// Folder of the official GitHub runner (the one with `run.cmd`).
     pub runner_dir: PathBuf,
 }
@@ -20,6 +22,7 @@ impl Default for Config {
         Config {
             mode: Mode::Automatic,
             battery_sends_to_github: true,
+            cpu_limit_percent: 100,
             runner_dir: PathBuf::new(),
         }
     }
@@ -84,6 +87,7 @@ mod tests {
         let config = Config {
             mode: Mode::Disabled,
             battery_sends_to_github: false,
+            cpu_limit_percent: 50,
             runner_dir: PathBuf::from(r"C:\runner"),
         };
         save(&path, &config).unwrap();

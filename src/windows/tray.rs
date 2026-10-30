@@ -1,12 +1,17 @@
 //! The tray icon and its menu. No window: the menu is the whole interface.
 
+use switchable_ci_runner::config::Config;
+use switchable_ci_runner::cpu;
 use switchable_ci_runner::decision::{Mode, Reason};
-use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
+use tray_icon::menu::{
+    CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
+};
 use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 
 pub enum Action {
     SetMode(Mode),
     SetBatterySendsToGithub(bool),
+    SetCpuLimit(u8),
     SetPat,
     Quit,
 }
@@ -18,12 +23,14 @@ pub struct Tray {
     always: CheckMenuItem,
     disabled: CheckMenuItem,
     battery: CheckMenuItem,
+    cpu: Vec<(u8, CheckMenuItem)>,
     pat: MenuId,
     quit: MenuId,
 }
 
 impl Tray {
-    pub fn new(mode: Mode, battery_sends_to_github: bool) -> Result<Self, String> {
+    pub fn new(config: &Config) -> Result<Self, String> {
+        let (mode, battery_sends_to_github) = (config.mode, config.battery_sends_to_github);
         let status = MenuItem::new("Starting…", false, None);
         let automatic = CheckMenuItem::new(
             "Automatic (idle 5 min: run; in use: ask me)",
@@ -49,6 +56,20 @@ impl Tray {
             battery_sends_to_github,
             None,
         );
+        let cpu_menu = Submenu::new("CPU limit (jobs always run at the lowest priority)", true);
+        let mut cpu = Vec::new();
+        for percent in cpu::CHOICES {
+            let label = if percent == 100 {
+                "100% (no limit)".to_string()
+            } else {
+                format!("{percent}%")
+            };
+            let item = CheckMenuItem::new(label, true, percent == config.cpu_limit_percent, None);
+            cpu_menu
+                .append(&item)
+                .map_err(|e| format!("tray menu: {e}"))?;
+            cpu.push((percent, item));
+        }
         let pat = MenuItem::new("Set CI token (PAT)…", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
@@ -61,6 +82,7 @@ impl Tray {
             &disabled,
             &PredefinedMenuItem::separator(),
             &battery,
+            &cpu_menu,
             &PredefinedMenuItem::separator(),
             &pat,
             &PredefinedMenuItem::separator(),
@@ -82,6 +104,7 @@ impl Tray {
             always,
             disabled,
             battery,
+            cpu,
             pat: pat.id().clone(),
             quit: quit.id().clone(),
         })
@@ -102,6 +125,12 @@ impl Tray {
                 actions.push(Action::SetMode(Mode::Disabled));
             } else if event.id == *self.battery.id() {
                 actions.push(Action::SetBatterySendsToGithub(self.battery.is_checked()));
+            } else if let Some((percent, _)) = self.cpu.iter().find(|(_, i)| *i.id() == event.id) {
+                let percent = *percent;
+                for (p, item) in &self.cpu {
+                    item.set_checked(*p == percent);
+                }
+                actions.push(Action::SetCpuLimit(percent));
             } else if event.id == self.pat {
                 actions.push(Action::SetPat);
             } else if event.id == self.quit {
