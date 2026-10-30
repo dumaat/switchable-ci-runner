@@ -8,10 +8,10 @@ Run your GitHub Actions jobs on your own machine **when you want**, automaticall
 
 ```powershell
 cargo build --release
-powershell -ExecutionPolicy Bypass -File scriptsinstall-windows.ps1 -Repo owner/name
+powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Repo owner/name
 ```
 
-It registers the official runner with the label `pc-dono` (change with `-Label`), adds the agent to your startup and starts it. Undo with `scriptsNinstall-windows.ps1`.
+It registers the official runner with the label `pc-dono` (change with `-Label`), adds the agent to your startup and starts it. Undo with `scripts\uninstall-windows.ps1`.
 
 ## Why
 
