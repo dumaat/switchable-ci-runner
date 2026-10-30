@@ -2,7 +2,7 @@
 
 Run your GitHub Actions jobs on your own machine **when you want**, automatically, and fall back to GitHub-hosted runners when you don't.
 
-> Status: v0.1, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
+> Status: v0.1.1, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
 
@@ -18,12 +18,13 @@ GitHub-hosted runners are slow for heavy builds, and on free accounts private-re
 
 `switchable-ci-runner` is a small tray app (like Tailscale: an icon, a menu, no window) that decides, job by job, whether your machine takes it:
 
-| Mode | What happens |
+| Mode (tray menu) | What happens |
 |---|---|
-| **Idle ≥ 5 min** | Your machine runs every job that arrives. |
-| **Idle < 5 min** | A notification asks "Run here or send to GitHub?". No answer in 45 s → GitHub. |
+| **Automatic**, idle ≥ 5 min | Your machine runs every job that arrives. |
+| **Automatic**, in use | A window asks "Run its jobs on this PC?". Yes → here. No, or no answer in 45 s → GitHub. |
+| **Always** | Every job runs here, idle or not, without asking. |
 | **Disabled** | Never runs; everything goes to GitHub. |
-| *Option:* **On battery → GitHub** | Toggle in the menu. |
+| *Option:* **On battery, send jobs to GitHub** | On battery, jobs go to GitHub in any mode. |
 
 It is meant for students and small teams who have a capable machine but not a big GitHub plan. **Linux is a first-class target**, alongside Windows.
 
@@ -52,6 +53,14 @@ jobs:
 ```
 
 Known cost: when your machine is off, disabled or you say no, the route step waits the full 90 s before falling back.
+
+## The CI token (PAT)
+
+The route step must see whether your runner is online, and GitHub's built-in `GITHUB_TOKEN` cannot list runners. So it needs a personal access token:
+
+1. GitHub → Settings → Developer settings → [Fine-grained tokens](https://github.com/settings/personal-access-tokens/new).
+2. Repository access: **only** your repository. Permissions: **Administration: Read-only**. Pick an expiry.
+3. Tray menu → **Set CI token (PAT)…** → paste → Save. It becomes the repository secret `RUNNER_STATUS_TOKEN`; nothing stays on your PC.
 
 ## Security
 
