@@ -12,6 +12,11 @@ param(
     [string]$Agent
 )
 $ErrorActionPreference = "Stop"
+# The runner executes CI jobs with this user's rights; an elevated install would give every job admin.
+$me = [Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()
+if ($me.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+    throw "Run this from a normal (not 'Run as administrator') PowerShell: CI jobs would run as admin."
+}
 # Windows PowerShell 5.1 leaves $PSScriptRoot empty inside param defaults, so the default is set here.
 if (-not $Agent) { $Agent = Join-Path $PSScriptRoot "..\target\release\switchable-ci-runner.exe" }
 
