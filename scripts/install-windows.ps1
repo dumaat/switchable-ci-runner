@@ -9,9 +9,11 @@ param(
     [Parameter(Mandatory = $true)][string]$Repo,
     [string]$Label = "pc-dono",
     [string]$RunnerVersion = "2.338.2",
-    [string]$Agent = "$PSScriptRoot\..\target\release\switchable-ci-runner.exe"
+    [string]$Agent
 )
 $ErrorActionPreference = "Stop"
+# Windows PowerShell 5.1 leaves $PSScriptRoot empty inside param defaults, so the default is set here.
+if (-not $Agent) { $Agent = Join-Path $PSScriptRoot "..\target\release\switchable-ci-runner.exe" }
 
 $data = Join-Path $env:LOCALAPPDATA "switchable-ci-runner"
 $runner = Join-Path $data "runner"
