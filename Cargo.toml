@@ -1,6 +1,6 @@
 [package]
 name = "switchable-ci-runner"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 license = "MIT"
 description = "Tray agent that runs your GitHub Actions self-hosted runner only when your machine is idle."

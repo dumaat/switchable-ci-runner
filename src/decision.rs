@@ -10,8 +10,10 @@ pub const IDLE_THRESHOLD: Duration = Duration::from_secs(5 * 60);
 /// The mode the owner picks in the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Mode {
-    /// Take jobs while the machine is idle.
+    /// Take jobs while the machine is idle; ask while it is in use.
     Automatic,
+    /// Take every job, idle or not, without asking.
+    Always,
     /// Never take jobs.
     Disabled,
 }
@@ -42,6 +44,8 @@ pub enum Wanted {
 pub enum Reason {
     JobRunning,
     Disabled,
+    /// The owner chose to take every job.
+    Always,
     OnBattery,
     Idle,
     /// In use, but the owner said yes to running here.
@@ -60,6 +64,9 @@ pub fn decide(inputs: Inputs) -> (Wanted, Reason) {
     }
     if inputs.on_battery && inputs.battery_sends_to_github {
         return (Wanted::Offline, Reason::OnBattery);
+    }
+    if inputs.mode == Mode::Always {
+        return (Wanted::Online, Reason::Always);
     }
     if inputs.idle_for >= IDLE_THRESHOLD {
         (Wanted::Online, Reason::Idle)
@@ -112,6 +119,22 @@ mod tests {
         );
         assert_eq!(
             decide(said_yes(Mode::Automatic, IN_USE, true, true)),
+            (Wanted::Offline, Reason::OnBattery)
+        );
+    }
+
+    #[test]
+    fn always_takes_jobs_while_in_use_but_respects_the_battery_option() {
+        assert_eq!(
+            decide(inputs(Mode::Always, IN_USE, false, true, false)),
+            (Wanted::Online, Reason::Always)
+        );
+        assert_eq!(
+            decide(inputs(Mode::Always, IN_USE, true, false, false)),
+            (Wanted::Online, Reason::Always)
+        );
+        assert_eq!(
+            decide(inputs(Mode::Always, IN_USE, true, true, false)),
             (Wanted::Offline, Reason::OnBattery)
         );
     }

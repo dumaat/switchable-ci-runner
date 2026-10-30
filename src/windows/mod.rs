@@ -3,6 +3,7 @@
 
 mod ask;
 mod install;
+mod pat;
 mod runner;
 mod sys;
 mod tray;
@@ -85,14 +86,22 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
     log("agent started");
 
     let tray = Tray::new(config.mode, config.battery_sends_to_github)?;
+    let repo = install::runner_repo(&config.runner_dir);
     if just_installed {
-        tray.balloon(
+        tray::notify(
             "switchable-ci-runner is installed",
-            "It runs your CI here when the PC is idle and asks you when you are using it.",
+            &format!(
+                "Installed for {}.\n\n\
+                 Find it in the tray, bottom right of the taskbar: the colored dot \
+                 (if hidden, click the ^ arrow). Click it for the options.\n\n\
+                 It starts with Windows. Files and logs:\n{}",
+                repo.as_deref().unwrap_or("your repository"),
+                paths.data.display()
+            ),
+            false,
         );
     }
     let mut runner = Runner::new(config.runner_dir.clone(), paths.runner_log.clone());
-    let repo = install::runner_repo(&config.runner_dir);
     let mut asking = Asking {
         new_runs: repo.clone().map(ask::watch_runs),
         repo,
@@ -108,6 +117,10 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
             match action {
                 Action::SetMode(mode) => config.mode = mode,
                 Action::SetBatterySendsToGithub(on) => config.battery_sends_to_github = on,
+                Action::SetPat => {
+                    set_pat_in_background(asking.repo.clone());
+                    continue;
+                }
                 Action::Quit => {
                     log("quit from the menu");
                     runner.stop();
@@ -211,6 +224,7 @@ fn status_line(reason: Reason) -> &'static str {
         Reason::JobRunning => "Running a job",
         Reason::Idle => "Online: taking jobs (idle)",
         Reason::OwnerSaidYes => "Online: you said yes",
+        Reason::Always => "Online: taking every job (Always)",
         Reason::InUse => "You are using the PC: I ask before each run",
         Reason::OnBattery => "Offline: on battery; jobs go to GitHub",
         Reason::Disabled => "Disabled: jobs go to GitHub",
@@ -225,4 +239,29 @@ pub fn append_log(path: &Path, line: &str) {
     if let Ok(mut file) = OpenOptions::new().create(true).append(true).open(path) {
         let _ = writeln!(file, "{now} {line}");
     }
+}
+
+/// The token box and `gh` run off the tray thread; the result is a message box.
+fn set_pat_in_background(repo: Option<String>) {
+    let Some(repo) = repo else {
+        tray::notify(
+            "switchable-ci-runner",
+            "The runner is not registered to a repository yet.",
+            true,
+        );
+        return;
+    };
+    std::thread::spawn(move || match pat::set_pat(&repo) {
+        Ok(true) => tray::notify(
+            "switchable-ci-runner",
+            &format!("Saved as the secret {} of {repo}.", pat::SECRET),
+            false,
+        ),
+        Ok(false) => {}
+        Err(e) => tray::notify(
+            "switchable-ci-runner",
+            &format!("Could not save the token: {e}"),
+            true,
+        ),
+    });
 }

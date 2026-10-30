@@ -1,5 +1,4 @@
 //! The tray icon and its menu. No window: the menu is the whole interface.
-use std::os::windows::process::CommandExt;
 
 use switchable_ci_runner::decision::{Mode, Reason};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
@@ -8,6 +7,7 @@ use tray_icon::{Icon, TrayIcon, TrayIconBuilder};
 pub enum Action {
     SetMode(Mode),
     SetBatterySendsToGithub(bool),
+    SetPat,
     Quit,
 }
 
@@ -15,8 +15,10 @@ pub struct Tray {
     icon: TrayIcon,
     status: MenuItem,
     automatic: CheckMenuItem,
+    always: CheckMenuItem,
     disabled: CheckMenuItem,
     battery: CheckMenuItem,
+    pat: MenuId,
     quit: MenuId,
 }
 
@@ -24,9 +26,15 @@ impl Tray {
     pub fn new(mode: Mode, battery_sends_to_github: bool) -> Result<Self, String> {
         let status = MenuItem::new("Starting…", false, None);
         let automatic = CheckMenuItem::new(
-            "Automatic (run jobs when idle 5 min)",
+            "Automatic (idle 5 min: run; in use: ask me)",
             true,
             mode == Mode::Automatic,
+            None,
+        );
+        let always = CheckMenuItem::new(
+            "Always (run every job here)",
+            true,
+            mode == Mode::Always,
             None,
         );
         let disabled = CheckMenuItem::new(
@@ -41,6 +49,7 @@ impl Tray {
             battery_sends_to_github,
             None,
         );
+        let pat = MenuItem::new("Set CI token (PAT)…", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
         let menu = Menu::new();
@@ -48,9 +57,12 @@ impl Tray {
             &status,
             &PredefinedMenuItem::separator(),
             &automatic,
+            &always,
             &disabled,
             &PredefinedMenuItem::separator(),
             &battery,
+            &PredefinedMenuItem::separator(),
+            &pat,
             &PredefinedMenuItem::separator(),
             &quit,
         ])
@@ -67,8 +79,10 @@ impl Tray {
             icon,
             status,
             automatic,
+            always,
             disabled,
             battery,
+            pat: pat.id().clone(),
             quit: quit.id().clone(),
         })
     }
@@ -80,11 +94,16 @@ impl Tray {
             if event.id == *self.automatic.id() {
                 self.show_mode(Mode::Automatic);
                 actions.push(Action::SetMode(Mode::Automatic));
+            } else if event.id == *self.always.id() {
+                self.show_mode(Mode::Always);
+                actions.push(Action::SetMode(Mode::Always));
             } else if event.id == *self.disabled.id() {
                 self.show_mode(Mode::Disabled);
                 actions.push(Action::SetMode(Mode::Disabled));
             } else if event.id == *self.battery.id() {
                 actions.push(Action::SetBatterySendsToGithub(self.battery.is_checked()));
+            } else if event.id == self.pat {
+                actions.push(Action::SetPat);
             } else if event.id == self.quit {
                 actions.push(Action::Quit);
             }
@@ -92,26 +111,9 @@ impl Tray {
         actions
     }
 
-    /// A Windows balloon (toast on Windows 10 and 11). tray-icon has none, so a
-    /// short hidden PowerShell shows it with .NET's NotifyIcon and exits.
-    pub fn balloon(&self, title: &str, text: &str) {
-        let quote = |s: &str| s.replace('\'', "''");
-        let script = format!(
-            "Add-Type -AssemblyName System.Windows.Forms; \
-             $n = New-Object System.Windows.Forms.NotifyIcon; \
-             $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; \
-             $n.ShowBalloonTip(8000, '{}', '{}', 'Info'); Start-Sleep 9; $n.Dispose()",
-            quote(title),
-            quote(text)
-        );
-        let _ = std::process::Command::new("powershell")
-            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
-            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
-            .spawn();
-    }
-
     fn show_mode(&self, mode: Mode) {
         self.automatic.set_checked(mode == Mode::Automatic);
+        self.always.set_checked(mode == Mode::Always);
         self.disabled.set_checked(mode == Mode::Disabled);
     }
 
@@ -122,7 +124,7 @@ impl Tray {
             .set_tooltip(Some(format!("switchable-ci-runner: {line}")));
         let color = match reason {
             Some(Reason::JobRunning) => Color::Blue,
-            Some(Reason::Idle) | Some(Reason::OwnerSaidYes) => Color::Green,
+            Some(Reason::Idle) | Some(Reason::OwnerSaidYes) | Some(Reason::Always) => Color::Green,
             Some(Reason::InUse) => Color::Yellow,
             Some(Reason::Disabled) | Some(Reason::OnBattery) | None => Color::Gray,
         };
@@ -161,4 +163,28 @@ fn dot(color: Color) -> Result<Icon, String> {
         }
     }
     Icon::from_rgba(rgba, SIZE, SIZE).map_err(|e| format!("tray icon image: {e}"))
+}
+
+/// A message box that does not block the tray: it runs on its own thread.
+pub fn notify(title: &str, text: &str, error: bool) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{
+        MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
+    };
+    let (title, text) = (super::ask::wide(title), super::ask::wide(text));
+    let icon = if error {
+        MB_ICONERROR
+    } else {
+        MB_ICONINFORMATION
+    };
+    std::thread::spawn(move || {
+        // SAFETY: both strings are NUL-terminated UTF-16 owned by this thread.
+        unsafe {
+            MessageBoxW(
+                std::ptr::null_mut(),
+                text.as_ptr(),
+                title.as_ptr(),
+                MB_OK | icon | MB_TOPMOST | MB_SETFOREGROUND,
+            );
+        }
+    });
 }
