@@ -26,6 +26,8 @@ pub struct Inputs {
     pub battery_sends_to_github: bool,
     /// A job is executing on this machine right now.
     pub job_running: bool,
+    /// The owner, while using the machine, answered "yes, run it here" to the popup.
+    pub owner_said_yes: bool,
 }
 
 /// Whether the runner process should be up (online, takes jobs) or down.
@@ -42,6 +44,9 @@ pub enum Reason {
     Disabled,
     OnBattery,
     Idle,
+    /// In use, but the owner said yes to running here.
+    OwnerSaidYes,
+    /// In use: the agent asks before taking a job; no answer means GitHub.
     InUse,
 }
 
@@ -58,6 +63,8 @@ pub fn decide(inputs: Inputs) -> (Wanted, Reason) {
     }
     if inputs.idle_for >= IDLE_THRESHOLD {
         (Wanted::Online, Reason::Idle)
+    } else if inputs.owner_said_yes {
+        (Wanted::Online, Reason::OwnerSaidYes)
     } else {
         (Wanted::Offline, Reason::InUse)
     }
@@ -78,7 +85,44 @@ mod tests {
             on_battery,
             battery_sends_to_github: option,
             job_running: job,
+            owner_said_yes: false,
         }
+    }
+
+    fn said_yes(mode: Mode, idle_for: Duration, on_battery: bool, option: bool) -> Inputs {
+        Inputs {
+            owner_said_yes: true,
+            ..inputs(mode, idle_for, on_battery, option, false)
+        }
+    }
+
+    #[test]
+    fn yes_runs_here_while_in_use() {
+        assert_eq!(
+            decide(said_yes(Mode::Automatic, IN_USE, false, true)),
+            (Wanted::Online, Reason::OwnerSaidYes)
+        );
+    }
+
+    #[test]
+    fn yes_never_overrides_disabled_or_the_battery_option() {
+        assert_eq!(
+            decide(said_yes(Mode::Disabled, IN_USE, false, true)),
+            (Wanted::Offline, Reason::Disabled)
+        );
+        assert_eq!(
+            decide(said_yes(Mode::Automatic, IN_USE, true, true)),
+            (Wanted::Offline, Reason::OnBattery)
+        );
+    }
+
+    #[test]
+    fn no_answer_while_in_use_stays_offline() {
+        // The popup timing out or "no" both leave owner_said_yes false.
+        assert_eq!(
+            decide(inputs(Mode::Automatic, IN_USE, false, true, false)),
+            (Wanted::Offline, Reason::InUse)
+        );
     }
 
     #[test]

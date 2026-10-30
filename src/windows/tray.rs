@@ -1,4 +1,5 @@
 //! The tray icon and its menu. No window: the menu is the whole interface.
+use std::os::windows::process::CommandExt;
 
 use switchable_ci_runner::decision::{Mode, Reason};
 use tray_icon::menu::{CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem};
@@ -91,6 +92,24 @@ impl Tray {
         actions
     }
 
+    /// A Windows balloon (toast on Windows 10 and 11). tray-icon has none, so a
+    /// short hidden PowerShell shows it with .NET's NotifyIcon and exits.
+    pub fn balloon(&self, title: &str, text: &str) {
+        let quote = |s: &str| s.replace('\'', "''");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; \
+             $n = New-Object System.Windows.Forms.NotifyIcon; \
+             $n.Icon = [System.Drawing.SystemIcons]::Information; $n.Visible = $true; \
+             $n.ShowBalloonTip(8000, '{}', '{}', 'Info'); Start-Sleep 9; $n.Dispose()",
+            quote(title),
+            quote(text)
+        );
+        let _ = std::process::Command::new("powershell")
+            .args(["-NoProfile", "-WindowStyle", "Hidden", "-Command", &script])
+            .creation_flags(windows_sys::Win32::System::Threading::CREATE_NO_WINDOW)
+            .spawn();
+    }
+
     fn show_mode(&self, mode: Mode) {
         self.automatic.set_checked(mode == Mode::Automatic);
         self.disabled.set_checked(mode == Mode::Disabled);
@@ -103,7 +122,7 @@ impl Tray {
             .set_tooltip(Some(format!("switchable-ci-runner: {line}")));
         let color = match reason {
             Some(Reason::JobRunning) => Color::Blue,
-            Some(Reason::Idle) => Color::Green,
+            Some(Reason::Idle) | Some(Reason::OwnerSaidYes) => Color::Green,
             Some(Reason::InUse) => Color::Yellow,
             Some(Reason::Disabled) | Some(Reason::OnBattery) | None => Color::Gray,
         };

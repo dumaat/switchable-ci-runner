@@ -2,16 +2,15 @@
 
 Run your GitHub Actions jobs on your own machine **when you want**, automatically, and fall back to GitHub-hosted runners when you don't.
 
-> Status: first Windows version (automatic and disabled modes, battery option). The "ask me" popup and Linux come next. Design: [docs/design.md](docs/design.md).
+> Status: v0.1, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
 
-```powershell
-cargo build --release
-powershell -ExecutionPolicy Bypass -File scripts\install-windows.ps1 -Repo owner/name
-```
+1. Install the [GitHub CLI](https://cli.github.com) and log in: `gh auth login` (you must be an admin of the repository).
+2. Download `switchable-ci-runner.exe` from the [latest release](https://github.com/dumaat/switchable-ci-runner/releases/latest) and double-click it (**not** "Run as administrator").
+3. Type the repository (`owner/name`). It downloads the official GitHub runner, checks its SHA-256, registers it with the label `pc-dono`, starts with Windows, and a balloon says it is installed.
 
-It registers the official runner with the label `pc-dono` (change with `-Label`), adds the agent to your startup and starts it. Undo with `scripts\uninstall-windows.ps1`.
+The icon sits in the tray (bottom right). Its menu: **Automatic**, **Disabled**, **On battery, send jobs to GitHub**, **Quit**. Files and logs: `%LOCALAPPDATA%\switchable-ci-runner`. Uninstall: `scripts\uninstall-windows.ps1 -Repo owner/name`.
 
 ## Why
 
@@ -30,19 +29,29 @@ It is meant for students and small teams who have a capable machine but not a bi
 
 ## How it works
 
-GitHub has no built-in "use my runner, otherwise yours". A job waiting for an offline self-hosted runner just waits. So the decision is made **before** the job is queued:
+GitHub has no built-in "use my runner, otherwise yours". A job waiting for an offline self-hosted runner just waits. So the decision is made **before** the jobs are queued:
 
-1. A tiny **router job** runs on `ubuntu-latest`, asks the GitHub API whether your runner is online and free, and outputs where the real jobs should go.
-2. The **tray agent** on your machine starts and stops the official GitHub runner according to the mode, so "online" always means "willing".
+1. A **route** step on `ubuntu-latest` (this repository is the action) asks the GitHub API whether your runner is online and free, waiting up to 90 s for your answer, and outputs where the real jobs go.
+2. The **tray agent** starts and stops the official runner, so "online" always means "willing". While you use the PC, it watches the repository's runs with your `gh` and asks you.
 
 ```yaml
 jobs:
   route:
-    uses: dumaat/switchable-ci-runner/.github/workflows/route.yml@v1   # planned
+    runs-on: ubuntu-latest
+    outputs:
+      runner: ${{ steps.route.outputs.runner }}
+    steps:
+      - id: route
+        uses: dumaat/switchable-ci-runner@v0.1.0
+        with:
+          token: ${{ secrets.RUNNER_STATUS_TOKEN }}   # can list the repo's runners
+          fallback: '"windows-latest"'
   build:
     needs: route
     runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
 ```
+
+Known cost: when your machine is off, disabled or you say no, the route step waits the full 90 s before falling back.
 
 ## Security
 
