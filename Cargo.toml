@@ -1,0 +1,26 @@
+[package]
+name = "switchable-ci-runner"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+description = "Tray agent that runs your GitHub Actions self-hosted runner only when your machine is idle."
+repository = "https://github.com/dumaat/switchable-ci-runner"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+[target.'cfg(windows)'.dependencies]
+tray-icon = "0.26.1"
+windows-sys = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_UI_Input_KeyboardAndMouse",
+  "Win32_UI_WindowsAndMessaging",
+  "Win32_System_SystemInformation",
+  "Win32_System_Power",
+  "Win32_System_Threading",
+  "Win32_System_Console",
+] }
+
+[profile.release]
+strip = true

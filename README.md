@@ -2,7 +2,16 @@
 
 Run your GitHub Actions jobs on your own machine **when you want**, automatically, and fall back to GitHub-hosted runners when you don't.
 
-> Status: early design. Nothing to install yet. See [docs/design.md](docs/design.md).
+> Status: first Windows version (automatic and disabled modes, battery option). The "ask me" popup and Linux come next. Design: [docs/design.md](docs/design.md).
+
+## Install (Windows)
+
+```powershell
+cargo build --release
+powershell -ExecutionPolicy Bypass -File scriptsinstall-windows.ps1 -Repo owner/name
+```
+
+It registers the official runner with the label `pc-dono` (change with `-Label`), adds the agent to your startup and starts it. Undo with `scriptsNinstall-windows.ps1`.
 
 ## Why
 
