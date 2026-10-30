@@ -292,9 +292,6 @@ mod tests {
             "\u{feff}{\"gitHubUrl\": \"https://github.com/octo-org/octo-repo\"}",
         )
         .unwrap();
-        assert_eq!(
-            runner_repo(&dir).as_deref(),
-            Some("octo-org/octo-repo")
-        );
+        assert_eq!(runner_repo(&dir).as_deref(), Some("octo-org/octo-repo"));
     }
 }
