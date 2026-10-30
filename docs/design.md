@@ -1,69 +1,32 @@
-# Runner self-hosted no PC do dono · pesquisa e opções
+# Design
 
-Estado: **proposta, aguardando aprovação do dono.** Nada foi registrado nem mudado no GitHub.
+## The problem
 
-## O problema
+GitHub-hosted runners can be slow for heavy builds, and a plain self-hosted runner is all or nothing: when the machine is busy, asleep or on battery, jobs wait in the queue for up to 24 hours. The goal: use your own machine when it suits you, GitHub's runners otherwise, without jobs getting stuck.
 
-A CI (trabalhos `linux` e `windows`) demora e atrasa o ciclo de PRs. O PC do dono (Windows, SolidWorks, cache do cargo quente) pode rodar os jobs quando estiver parado, sem atrapalhar quando estiver em uso, em trânsito ou com pouca bateria. Três modos:
+## Facts that shape the design
 
-1. **Inativo há ≥ 5 min:** roda tudo o que chegar.
-2. **Inativo há < 5 min:** popup pergunta "rodar aqui ou mandar para o GitHub?".
-3. **Desativado:** nunca roda.
+- **`runs-on` with a list is AND, not OR.** `runs-on: [self-hosted, switchable]` needs one runner with every label. GitHub has no "my runner, otherwise yours" ([community request](https://github.com/orgs/community/discussions/20019)).
+- **A queued job waits up to 24 h** for a matching runner; `timeout-minutes` only counts once the job starts. So the choice must be made before the job is queued, with the machine known to be available.
+- **A runner cannot refuse a job once assigned.** Any question to the owner happens before routing.
+- **Listing runners** (`GET /repos/{owner}/{repo}/actions/runners`, fields `status` and `busy`) needs repository admin rights; the workflow's `GITHUB_TOKEN` cannot do it, hence the PAT.
+- **Idle time and power** on Windows: `GetLastInputInfo` and `GetSystemPowerStatus`. They only see the interactive session, so the agent is a tray app in the user's session, not a service.
 
-## Fatos levantados
+## The pieces
 
-- **Repositório privado** (`gh repo view`: `PRIVATE`). O risco clássico (PR de fork de estranho rodando código no PC) é bem menor que num público, mas a recomendação do GitHub continua: runner self-hosted não é sandbox; quem escreve no repositório roda código no PC. Em repositório privado, PRs de fork só rodam se a opção "Run workflows from fork pull requests" estiver ligada; manter desligada.
-- **`runs-on` com lista é E, não OU.** `runs-on: [self-hosted, pc-dono]` exige um runner com todas as labels. Não existe "use o PC, senão o GitHub" nativo.
-- **Job sem runner fica na fila até 24 h** e então falha. `timeout-minutes` só conta depois que o job começa; não protege a fila. Logo, mandar um job para o PC e o PC sumir = job preso. O roteamento tem de ser decidido **antes**, com o PC comprovadamente disponível.
-- **Uma vez atribuído, o runner não recusa o job.** O popup tem de acontecer antes da atribuição, nunca dentro do job.
-- **API de runners:** `GET /repos/{owner}/{repo}/actions/runners` devolve `status` (`online`/`offline`) e `busy`. Exige token com permissão de administração do repositório; o `GITHUB_TOKEN` não basta. Precisa de um PAT fine-grained (só este repositório, "Administration: read") guardado como secret.
-- **`--ephemeral`:** o runner aceita um job e se desregistra; limpa estado entre jobs. Bom para segurança, mas exige re-registro a cada job (token de registro via API). Alternativa: runner persistente com `--disableupdate` não, só o serviço normal com diretório de trabalho limpo pelo próprio workflow.
-- **Inatividade:** `GetLastInputInfo` (user32) dá o tick do último teclado/mouse; idle = `GetTickCount64() - dwTime`. Só funciona na sessão interativa do usuário: o agente tem de rodar como app de bandeja na sessão do dono, não como serviço (serviço roda na sessão 0 e não vê a entrada nem mostra popup).
-- **Energia:** `GetSystemPowerStatus` dá `ACLineStatus` (0 bateria, 1 tomada) e `BatteryLifePercent`. Também há eventos `WM_POWERBROADCAST` para suspensão/retomada.
-- **Popup com tempo limite:** `MessageBoxTimeout` (não documentada) ou, melhor, uma janela própria/notificação toast com contagem regressiva. Padrão sem resposta: **GitHub** (ele pode estar longe do PC).
+1. **Route step** (`action.yml`), on `ubuntu-latest`: polls the runners API for up to `wait-seconds`; outputs `["self-hosted", label]` if a matching runner is online and free, the fallback otherwise.
+2. **Tray agent**: every 5 s reads idle time and power, decides (a pure function, `src/decision.rs`), and starts or stops the official runner. It stops it with Ctrl+C so GitHub sees it go offline at once, never mid-job, and keeps the PC awake only while a job runs.
+3. **The question**: while the owner uses the PC, the agent lists the repository's active runs with the owner's `gh`; a new one opens a 45 s message box. Yes brings the runner online for 10 minutes; no or no answer leaves it offline, and the route step falls back.
 
-## Opções
+## Alternatives considered
 
-### A · Job roteador + agente que liga e desliga o runner (recomendada)
+- **A repository variable written by the agent** (`vars.RUNNER`): simpler, no route step, but no question possible and a stale value strands jobs for 24 h.
+- **Manual choice per run** (`workflow_dispatch` input): no automation.
+- **Run on both and keep the first**: doubles the work, still strands the self-hosted copy.
+- **Existing route actions** ([`jimmygchen/runner-fallback-action`](https://github.com/jimmygchen/runner-fallback-action), archived; fork [`mikehardy/runner-fallback-action`](https://github.com/mikehardy/runner-fallback-action)): they check once and do not wait for the owner's answer, so this repository ships its own small step.
 
-- Um job `rota` em `ubuntu-latest` consulta a API: se existir runner `pc-dono` `online` e não `busy`, devolve `["self-hosted","pc-dono"]`; senão `"windows-latest"`. Os jobs pesados usam `runs-on: ${{ fromJSON(needs.rota.outputs.runner) }}`.
-- O agente de bandeja no PC controla o processo do runner:
-  - modo 3 ou bateria → runner parado (offline) → tudo vai para o GitHub;
-  - idle ≥ 5 min na tomada → runner ligado;
-  - idle < 5 min → runner parado; o agente consulta a API a cada ~15 s por execuções novas; ao ver uma, mostra o popup (45 s, padrão GitHub). "Sim" liga o runner; o `rota` espera até ~60 s pelo runner ficar online antes de escolher o GitHub.
-- Proteções: `timeout-minutes` nos jobs; o agente nunca desliga o runner com job em andamento (`busy`).
-- Custo: ~15–30 s a mais por execução no `rota`; um PAT para guardar.
-- Risco residual: corrida pequena (runner fica offline entre a consulta e a atribuição, ex. PC dorme) → job preso. Mitigação: o agente segura o modo de suspensão do Windows (`SetThreadExecutionState`) enquanto o runner estiver online.
+## Known limits
 
-### B · Variável do repositório escrita pelo agente
-
-O agente grava `vars.RUNNER_WINDOWS` (`windows-latest` ou `["self-hosted","pc-dono"]`) conforme o modo. Sem job roteador. Mais simples, mas não atende o modo 2 (a decisão é tomada no enfileiramento, sem popup) e uma variável velha (PC desligou sem avisar) prende jobs por 24 h. Descartada como solução final; serve de primeiro passo manual.
-
-### C · Escolha manual por `workflow_dispatch`
-
-Input "onde rodar". Zero automação, zero risco, nenhum dos três modos. Descartada.
-
-### D · Rodar sempre nos dois e aproveitar o primeiro
-
-Duplica custo e não resolve o job preso quando o PC some. Descartada.
-
-## Recomendação
-
-**Opção A**, em fatias:
-
-1. Só o trabalho `windows` (o PC é Windows; `linux` fica no GitHub por ora, ou depois via WSL/Docker).
-2. Agente sem popup: modos 1 e 3 + regra da bateria. Medir o ganho de tempo.
-3. Popup do modo 2.
-
-Depende de aprovação do dono para: criar o PAT fine-grained e o secret, registrar o runner com a label `pc-dono`, e confirmar que "Run workflows from fork pull requests" está desligada.
-
-## Decisões do dono (2026-10-30)
-
-- **Forma:** ícone na bandeja do sistema (canto inferior direito), como o Tailscale. Sem janela, só o menu do ícone.
-- **Bateria:** é uma opção do menu ("Na bateria, mandar para o GitHub"), não uma regra fixa.
-- **Popup:** 45 s; sem resposta, vai para o GitHub.
-- **Linguagem:** Rust.
-
-- **Escopo:** projeto próprio, público e open source, multiplataforma (Linux é prioridade de acessibilidade), com release de binários; entra aqui como submodule, na infra de desenvolvimento. Motivação: rodar a CI na própria máquina quando o dono quer, automaticamente, e manter o Actions quando não.
-
-Ainda em aberto: a opção A em si, e a aprovação para o PAT, o registro do runner e a conferência de PRs de fork.
+- When the machine is off, disabled, or the owner says no, the route step waits the full `wait-seconds` before falling back.
+- The question appears for every new run of the repository, including workflows that would not use the machine.
+- Windows only so far; Linux (logind or Wayland idle, UPower, the KSNI tray) is next.

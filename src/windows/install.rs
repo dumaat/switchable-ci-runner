@@ -2,7 +2,7 @@
 //! over to the installed copy, which shows a balloon. No installer, no script.
 //!
 //! Steps: refuse to run elevated; ask which repository; download the official
-//! GitHub runner and check its SHA-256; register it with the label `pc-dono`
+//! GitHub runner and check its SHA-256; register it with the label `switchable`
 //! using the owner's `gh`; copy this program to %LOCALAPPDATA%; start it at logon.
 
 use super::Paths;
@@ -13,7 +13,7 @@ use std::path::Path;
 use std::process::Command;
 use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
 
-pub const LABEL: &str = "pc-dono";
+pub const LABEL: &str = "switchable";
 
 pub fn install(paths: &Paths, me: &Path) -> Result<(), String> {
     if elevated() {
@@ -276,7 +276,7 @@ mod tests {
 
     #[test]
     fn repo_names() {
-        assert!(is_repo("dumaat/hardware-config-as-code"));
+        assert!(is_repo("octo-org/octo-repo"));
         assert!(!is_repo("dumaat"));
         assert!(!is_repo("a/b/c"));
         assert!(!is_repo("a/b c"));
@@ -289,12 +289,12 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
         fs::write(
             dir.join(".runner"),
-            "\u{feff}{\"gitHubUrl\": \"https://github.com/dumaat/hardware-config-as-code\"}",
+            "\u{feff}{\"gitHubUrl\": \"https://github.com/octo-org/octo-repo\"}",
         )
         .unwrap();
         assert_eq!(
             runner_repo(&dir).as_deref(),
-            Some("dumaat/hardware-config-as-code")
+            Some("octo-org/octo-repo")
         );
     }
 }

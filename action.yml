@@ -9,7 +9,7 @@ inputs:
     required: true
   label:
     description: The label the agent registered the runner with.
-    default: pc-dono
+    default: switchable
   fallback:
     description: The GitHub-hosted runner, as JSON (a string or a list of labels).
     default: '"windows-latest"'
@@ -18,7 +18,7 @@ inputs:
     default: "90"
 outputs:
   runner:
-    description: JSON for runs-on, e.g. ["self-hosted","pc-dono"] or "windows-latest".
+    description: JSON for runs-on, e.g. ["self-hosted","switchable"] or "windows-latest".
     value: ${{ steps.route.outputs.runner }}
 runs:
   using: composite

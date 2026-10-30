@@ -2,13 +2,13 @@
 
 Run your GitHub Actions jobs on your own machine **when you want**, automatically, and fall back to GitHub-hosted runners when you don't.
 
-> Status: v0.1.1, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
+> Status: v0.1.2, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
 
 1. Install the [GitHub CLI](https://cli.github.com) and log in: `gh auth login` (you must be an admin of the repository).
 2. Download `switchable-ci-runner.exe` from the [latest release](https://github.com/dumaat/switchable-ci-runner/releases/latest) and double-click it (**not** "Run as administrator").
-3. Type the repository (`owner/name`). It downloads the official GitHub runner, checks its SHA-256, registers it with the label `pc-dono`, starts with Windows, and a message says it is installed and where to find it.
+3. Type the repository (`owner/name`). It downloads the official GitHub runner, checks its SHA-256, registers it with the label `switchable`, starts with Windows, and a message says it is installed and where to find it.
 
 The icon sits in the tray (bottom right). Its menu: **Automatic** (idle: run; in use: ask), **Always** (run every job), **Disabled**, **On battery, send jobs to GitHub**, **Set CI token (PAT)…** (saved as the repo secret `RUNNER_STATUS_TOKEN` through `gh`, not kept on the PC), **Quit**. To update, run a newer .exe: it replaces the installed one. Files and logs: `%LOCALAPPDATA%\switchable-ci-runner`. Uninstall: `scripts\uninstall-windows.ps1 -Repo owner/name`.
 
@@ -43,7 +43,7 @@ jobs:
       runner: ${{ steps.route.outputs.runner }}
     steps:
       - id: route
-        uses: dumaat/switchable-ci-runner@v0.1.1
+        uses: dumaat/switchable-ci-runner@v0.1.2
         with:
           token: ${{ secrets.RUNNER_STATUS_TOKEN }}   # can list the repo's runners
           fallback: '"windows-latest"'
