@@ -32,7 +32,11 @@ $body = gh api "repos/actions/runner/releases/tags/v$RunnerVersion" --jq .body
 $expected = [regex]::Match($body, '<!-- BEGIN SHA win-x64 -->([0-9a-f]{64})').Groups[1].Value
 if (-not $expected) { throw "No SHA-256 for win-x64 in the v$RunnerVersion release notes" }
 if (-not (Test-Path $zip)) {
-    Invoke-WebRequest "https://github.com/actions/runner/releases/download/v$RunnerVersion/actions-runner-win-x64-$RunnerVersion.zip" -OutFile $zip
+    # Without this, Windows PowerShell 5.1 redraws the progress bar per chunk and a 100 MB download takes many minutes.
+    $ProgressPreference = "SilentlyContinue"
+    # Download to a .part file and rename only when complete, so a Ctrl+C never leaves half a zip behind.
+    Invoke-WebRequest "https://github.com/actions/runner/releases/download/v$RunnerVersion/actions-runner-win-x64-$RunnerVersion.zip" -OutFile "$zip.part"
+    Move-Item "$zip.part" $zip -Force
 }
 $got = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLower()
 if ($got -ne $expected) { Remove-Item $zip; throw "SHA-256 mismatch: expected $expected, got $got" }
