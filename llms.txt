@@ -21,7 +21,7 @@ jobs:
       runner: ${{ steps.route.outputs.runner }}
     steps:
       - id: route
-        uses: dumaat/switchable-ci-runner@v0.1.4
+        uses: dumaat/switchable-ci-runner@v0.1.5
         with:
           token: ${{ secrets.RUNNER_STATUS_TOKEN }}
           fallback: '"windows-latest"'
@@ -34,4 +34,4 @@ jobs:
         part: [a, b]
 ```
 
-Parallel jobs: tray menu "Parallel jobs" (1, 2, 4, 8, Custom…) or `parallel_jobs` in `%APPDATA%\switchable-ci-runner\config.json`; one official runner per job (`runner`, `runner-2`, ...), a shared CPU cap, a busy runner is never stopped. Single-instance tools need `concurrency` in the workflow.
+Parallel jobs: tray menu "Parallel jobs" (Auto, the default: one job per 4 physical cores and per 8 GB; or 1, 2, 4, 8, Custom… up to the physical cores) or `parallel_jobs` in `%APPDATA%\switchable-ci-runner\config.json`; one official runner per job (`runner`, `runner-2`, ...), a shared CPU cap, a busy runner is never stopped. Single-instance tools need `concurrency` in the workflow.

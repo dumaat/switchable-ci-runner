@@ -1,8 +1,9 @@
 //! The tray icon and its menu. No window: the menu is the whole interface.
 
 use switchable_ci_runner::config::Config;
+use switchable_ci_runner::cpu;
 use switchable_ci_runner::decision::{Mode, Reason};
-use switchable_ci_runner::{cpu, parallel};
+use switchable_ci_runner::parallel::{self, Hardware};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -27,6 +28,7 @@ pub struct Tray {
     disabled: CheckMenuItem,
     battery: CheckMenuItem,
     cpu: Vec<(u8, CheckMenuItem)>,
+    /// Auto is `parallel_jobs` 0; it sits with the quick choices.
     parallel: Vec<(u8, CheckMenuItem)>,
     custom: CheckMenuItem,
     pat: MenuId,
@@ -34,8 +36,9 @@ pub struct Tray {
 }
 
 impl Tray {
-    /// `cores` limits the quick choices for parallel jobs; "Custom…" goes up to it too.
-    pub fn new(config: &Config, cores: usize) -> Result<Self, String> {
+    /// The physical cores limit the quick choices for parallel jobs; "Custom…" goes
+    /// up to them too. Auto shows the number it picks for this PC.
+    pub fn new(config: &Config, hw: Hardware) -> Result<Self, String> {
         let (mode, battery_sends_to_github) = (config.mode, config.battery_sends_to_github);
         let status = MenuItem::new("Starting…", false, None);
         let automatic = CheckMenuItem::new(
@@ -80,10 +83,22 @@ impl Tray {
             cpu.push((percent, item));
         }
         let parallel_menu = Submenu::new("Parallel jobs (one runner each)", true);
-        let mut parallel = Vec::new();
+        let auto = CheckMenuItem::new(
+            format!(
+                "Auto ({} for this PC's cores and memory)",
+                parallel::auto_jobs(hw)
+            ),
+            true,
+            false,
+            None,
+        );
+        parallel_menu
+            .append_items(&[&auto, &PredefinedMenuItem::separator()])
+            .map_err(|e| format!("tray menu: {e}"))?;
+        let mut parallel = vec![(parallel::AUTO, auto)];
         for n in parallel::CHOICES
             .into_iter()
-            .filter(|&n| usize::from(n) <= cores.max(1))
+            .filter(|&n| n <= parallel::max_jobs(hw))
         {
             let label = if n == 1 {
                 "1 (one job at a time)".to_string()

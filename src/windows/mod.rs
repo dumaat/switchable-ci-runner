@@ -20,7 +20,7 @@ use std::thread::sleep;
 use std::time::{Duration, Instant, SystemTime};
 use switchable_ci_runner::config::{self, Config};
 use switchable_ci_runner::decision::{Inputs, Reason, Wanted, decide};
-use switchable_ci_runner::parallel;
+use switchable_ci_runner::parallel::{self, Hardware};
 use switchable_ci_runner::runs::Runs;
 use tray::{Action, Tray};
 
@@ -85,13 +85,13 @@ struct Asking {
     asked: Vec<u64>,
 }
 
-/// The config as the owner left it, with `parallel_jobs` kept within the cores.
-/// A value outside is logged and shown, never silently turned into zero.
-fn checked(mut config: Config, paths: &Paths, cores: usize, log: &dyn Fn(&str)) -> Config {
+/// The config as the owner left it, with `parallel_jobs` kept within the physical
+/// cores (Auto stays Auto). A value outside is logged and shown.
+fn checked(mut config: Config, paths: &Paths, hw: Hardware, log: &dyn Fn(&str)) -> Config {
     if config.runner_dir.as_os_str().is_empty() {
         config.runner_dir = paths.runner_dir.clone();
     }
-    let (n, warning) = parallel::clamp(config.parallel_jobs, cores);
+    let (n, warning) = parallel::clamp(config.parallel_jobs, hw);
     if let Some(w) = warning {
         log(&w);
         tray::notify("switchable-ci-runner", &w, true);
@@ -106,22 +106,24 @@ fn modified(path: &Path) -> Option<SystemTime> {
 
 fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
     let log = |line: &str| append_log(&paths.agent_log, line);
-    let cores = std::thread::available_parallelism()
-        .map(|n| n.get())
-        .unwrap_or(1);
+    let hw = sys::hardware();
+    let standby = sys::modern_standby();
     let mut config = checked(
         config::load(&paths.config).map_err(|e| e.to_string())?,
         paths,
-        cores,
+        hw,
         &log,
     );
     let mut stamp = modified(&paths.config);
     log(&format!(
-        "agent started ({} parallel jobs, {cores} cores)",
-        config.parallel_jobs
+        "agent started ({} parallel jobs; {} physical cores, {} GB, Auto {}; modern standby: {standby})",
+        parallel::wanted(config.parallel_jobs, hw),
+        hw.cores,
+        hw.ram_bytes >> 30,
+        parallel::auto_jobs(hw),
     ));
 
-    let tray = Tray::new(&config, cores)?;
+    let tray = Tray::new(&config, hw)?;
     let repo = install::runner_repo(&config.runner_dir);
     if just_installed {
         tray::notify(
@@ -168,7 +170,10 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
                 Action::SetParallelJobs(n) => config.parallel_jobs = n,
                 Action::AskParallelJobs => {
                     if custom_box.is_none() {
-                        custom_box = Some(ask::ask_parallel_jobs(config.parallel_jobs, cores));
+                        custom_box = Some(ask::ask_parallel_jobs(
+                            parallel::wanted(config.parallel_jobs, hw),
+                            parallel::max_jobs(hw),
+                        ));
                     }
                     // The click toggled the checkmark; the number decides it.
                     tray.sync(&config);
@@ -181,7 +186,7 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
                 Action::Quit => {
                     log("quit from the menu");
                     pool.stop_all();
-                    sys::keep_awake(false);
+                    sys::keep_awake(false, standby);
                     return Ok(());
                 }
             }
@@ -191,7 +196,7 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
             && let Ok(text) = rx.try_recv()
         {
             custom_box = None;
-            match parallel::parse_custom(&text, cores) {
+            match parallel::parse_custom(&text, usize::from(parallel::max_jobs(hw))) {
                 Ok(Some(n)) => {
                     config.parallel_jobs = n;
                     changed = true;
@@ -226,12 +231,12 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
         let due = last_tick.is_none_or(|t| t.elapsed() >= TICK);
         if due && modified(&paths.config) != stamp {
             stamp = modified(&paths.config);
-            if reload(paths, cores, &mut config, &pool, &tray, &log) {
+            if reload(paths, hw, &mut config, &pool, &tray, &log) {
                 changed = true;
             }
         }
         if changed || due {
-            tick(&config, &mut pool, &mut asking, &tray, &log);
+            tick(&config, hw, standby, &mut pool, &mut asking, &tray, &log);
             last_tick = Some(Instant::now());
         }
         sleep(PUMP);
@@ -242,7 +247,7 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
 /// A file that does not parse keeps the settings in use, with a message.
 fn reload(
     paths: &Paths,
-    cores: usize,
+    hw: Hardware,
     config: &mut Config,
     pool: &Pool,
     tray: &Tray,
@@ -250,7 +255,7 @@ fn reload(
 ) -> bool {
     match config::load(&paths.config) {
         Ok(new) => {
-            let new = checked(new, paths, cores, log);
+            let new = checked(new, paths, hw, log);
             if new.cpu_limit_percent != config.cpu_limit_percent
                 && let Err(e) = pool.set_cpu_cap(new.cpu_limit_percent)
             {
@@ -273,7 +278,15 @@ fn reload(
     }
 }
 
-fn tick(config: &Config, pool: &mut Pool, asking: &mut Asking, tray: &Tray, log: &dyn Fn(&str)) {
+fn tick(
+    config: &Config,
+    hw: Hardware,
+    standby: bool,
+    pool: &mut Pool,
+    asking: &mut Asking,
+    tray: &Tray,
+    log: &dyn Fn(&str),
+) {
     // Runs that started since the last tick; drained every time so none is asked about late.
     let mut new_runs = Vec::new();
     if let Some(rx) = &asking.snapshots {
@@ -305,7 +318,7 @@ fn tick(config: &Config, pool: &mut Pool, asking: &mut Asking, tray: &Tray, log:
         }
     }
     let summary = pool.tick(
-        usize::from(config.parallel_jobs),
+        usize::from(parallel::wanted(config.parallel_jobs, hw)),
         wanted == Wanted::Online,
         log,
     );
@@ -317,8 +330,9 @@ fn tick(config: &Config, pool: &mut Pool, asking: &mut Asking, tray: &Tray, log:
         );
         return;
     }
-    // A job anywhere keeps the PC awake; a busy runner is never stopped (`parallel::plan`).
-    sys::keep_awake(summary.busy > 0);
+    // A job anywhere keeps the PC awake (with Modern Standby, the screen too: standby
+    // cuts the network); a busy runner is never stopped (`parallel::plan`).
+    sys::keep_awake(summary.busy > 0, standby);
     tray.show(
         &status_line(reason, summary),
         Some(reason),

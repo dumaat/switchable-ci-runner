@@ -7,25 +7,60 @@ use std::path::{Path, PathBuf};
 /// Quick choices in the tray menu; "Custom…" takes any number up to the cores.
 pub const CHOICES: [u8; 4] = [1, 2, 4, 8];
 
-/// The number the owner asked for, kept within 1..=cores. A value outside
-/// comes back clamped with a warning: 0 never turns into "no runner at all"
-/// (that is what Disabled is for), and more runners than cores only slows every job.
-pub fn clamp(requested: u8, cores: usize) -> (u8, Option<String>) {
-    let max = u8::try_from(cores.max(1)).unwrap_or(u8::MAX);
-    if requested == 0 {
-        (
-            1,
-            Some("parallel_jobs 0 is not valid; using 1 (use Disabled to run no jobs)".into()),
-        )
-    } else if requested > max {
+/// `parallel_jobs` 0 in the config: the agent picks the number from the PC.
+pub const AUTO: u8 = 0;
+
+/// What decides how many jobs this PC can take at once.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Hardware {
+    /// Physical cores, not logical threads: two threads of one core share it.
+    pub cores: usize,
+    pub ram_bytes: u64,
+}
+
+/// Cores and memory one CI job gets in Auto. A build (cargo, a C++ compiler, a
+/// bundler) already uses every thread by itself, and the linker and a test browser
+/// take a few GB at their peak. Sixteen runners on 8 cores and 32 GB starved the
+/// runners' own connection to GitHub, and the jobs failed with "lost communication".
+const CORES_PER_JOB: usize = 4;
+const GB_PER_JOB: u64 = 8;
+
+/// The number Auto picks: one job per 4 physical cores and per 8 GB, at least one.
+/// 8 cores and 32 GB: 2 jobs.
+pub fn auto_jobs(hw: Hardware) -> u8 {
+    let by_cores = hw.cores / CORES_PER_JOB;
+    let by_ram = usize::try_from(hw.ram_bytes / (GB_PER_JOB << 30)).unwrap_or(usize::MAX);
+    u8::try_from(by_cores.min(by_ram).max(1)).unwrap_or(u8::MAX)
+}
+
+/// The most the owner may ask for by hand: one job per physical core.
+pub fn max_jobs(hw: Hardware) -> u8 {
+    u8::try_from(hw.cores.max(1)).unwrap_or(u8::MAX)
+}
+
+/// The number the owner asked for, kept within 1..=physical cores. Auto (0) is
+/// kept as Auto. A value above comes back clamped with a warning, since more
+/// runners than cores only slows every job.
+pub fn clamp(requested: u8, hw: Hardware) -> (u8, Option<String>) {
+    let max = max_jobs(hw);
+    if requested > max {
         (
             max,
             Some(format!(
-                "parallel_jobs {requested} is more than the {max} cores; using {max}"
+                "parallel_jobs {requested} is more than the {max} physical cores; using {max}"
             )),
         )
     } else {
         (requested, None)
+    }
+}
+
+/// How many runners to keep: the owner's number, or Auto's.
+pub fn wanted(requested: u8, hw: Hardware) -> u8 {
+    if requested == AUTO {
+        auto_jobs(hw)
+    } else {
+        clamp(requested, hw).0
     }
 }
 
@@ -174,18 +209,53 @@ pub fn classify_exit(code: Option<i32>) -> Exit {
 mod tests {
     use super::*;
 
+    const GB: u64 = 1 << 30;
+
+    fn hw(cores: usize, gb: u64) -> Hardware {
+        Hardware {
+            cores,
+            ram_bytes: gb * GB,
+        }
+    }
+
+    #[test]
+    fn auto_takes_one_job_per_four_cores_and_eight_gb() {
+        // The laptop that froze with 16 runners: 8 cores, 31.3 GB.
+        assert_eq!(
+            auto_jobs(Hardware {
+                cores: 8,
+                ram_bytes: 33_600_000_000
+            }),
+            2
+        );
+        assert_eq!(auto_jobs(hw(16, 64)), 4);
+        // Memory is the limit here, cores there.
+        assert_eq!(auto_jobs(hw(16, 16)), 2);
+        assert_eq!(auto_jobs(hw(4, 64)), 1);
+        // Small or unknown machines still get one runner.
+        assert_eq!(auto_jobs(hw(2, 4)), 1);
+        assert_eq!(auto_jobs(hw(0, 0)), 1);
+    }
+
     #[test]
     fn clamp_keeps_values_in_range_and_warns() {
-        assert_eq!(clamp(4, 16), (4, None));
-        assert_eq!(clamp(16, 16), (16, None));
-        let (n, w) = clamp(0, 16);
-        assert_eq!(n, 1);
+        assert_eq!(clamp(4, hw(8, 32)), (4, None));
+        assert_eq!(clamp(8, hw(8, 32)), (8, None));
+        // Logical threads do not count: 16 on 8 physical cores is clamped.
+        let (n, w) = clamp(16, hw(8, 32));
+        assert_eq!(n, 8);
         assert!(w.is_some());
-        let (n, w) = clamp(32, 16);
-        assert_eq!(n, 16);
-        assert!(w.is_some());
-        // A machine that reports no cores still gets one runner.
-        assert_eq!(clamp(1, 0), (1, None));
+        // Auto stays Auto.
+        assert_eq!(clamp(AUTO, hw(8, 32)), (AUTO, None));
+        // A machine that reports no cores still allows one runner.
+        assert_eq!(clamp(1, hw(0, 0)), (1, None));
+    }
+
+    #[test]
+    fn wanted_resolves_auto() {
+        assert_eq!(wanted(AUTO, hw(8, 32)), 2);
+        assert_eq!(wanted(3, hw(8, 32)), 3);
+        assert_eq!(wanted(16, hw(8, 32)), 8);
     }
 
     #[test]
@@ -202,7 +272,7 @@ mod tests {
     #[test]
     fn every_menu_choice_is_valid_on_a_big_machine() {
         for n in CHOICES {
-            assert_eq!(clamp(n, 64), (n, None));
+            assert_eq!(clamp(n, hw(64, 256)), (n, None));
         }
     }
 

@@ -11,7 +11,7 @@ Use it if you want to:
 - run CI on your own PC at the lowest priority, with a CPU cap, so it never slows you down;
 - run several jobs at once on a machine with many cores (one runner per job).
 
-> Status: v0.1.4, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
+> Status: v0.1.5, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
 
@@ -26,7 +26,7 @@ The icon sits in the tray (bottom right; click the ^ arrow if it is hidden). Its
 | **Automatic** / **Always** / **Disabled** | The mode (table below). |
 | **On battery, send jobs to GitHub** | On battery, jobs go to GitHub in any mode. |
 | **CPU limit for all jobs** → 25 / 50 / 75 / 100% | Hard cap on the CPU that all runners and everything their jobs start can use, together. Applies at once, to running jobs too. |
-| **Parallel jobs** → 1 / 2 / 4 / 8 / Custom… | How many jobs may run at once, one runner each ([below](#parallel-jobs)). Custom… takes any number up to your logical cores. |
+| **Parallel jobs** → Auto / 1 / 2 / 4 / 8 / Custom… | How many jobs may run at once, one runner each ([below](#parallel-jobs)). Auto, the default, picks the number from your cores and memory. Custom… takes any number up to your physical cores. |
 | **Set CI token (PAT)…** | Saves the token the route step needs (below). |
 | **Quit** | Stops the runners and the agent until the next logon. |
 
@@ -69,7 +69,7 @@ jobs:
       runner: ${{ steps.route.outputs.runner }}
     steps:
       - id: route
-        uses: dumaat/switchable-ci-runner@v0.1.4
+        uses: dumaat/switchable-ci-runner@v0.1.5
         with:
           token: ${{ secrets.RUNNER_STATUS_TOKEN }}   # can list the repo's runners
           fallback: '"windows-latest"'
@@ -85,7 +85,10 @@ Known cost: when your machine is off, disabled or you say no, the route step wai
 
 ## Parallel jobs
 
-One official runner runs one job at a time. To run several jobs at once, the agent keeps several runners: `runner`, `runner-2`, `runner-3`, ... in `%LOCALAPPDATA%\switchable-ci-runner`, each with its own work folder. Set the number in **Parallel jobs**, or with `parallel_jobs` in the config file.
+One official runner runs one job at a time. To run several jobs at once, the agent keeps several runners: `runner`, `runner-2`, `runner-3`, ... in `%LOCALAPPDATA%\switchable-ci-runner`, each with its own work folder. Set the number in **Parallel jobs**, or with `parallel_jobs` in the config file (`0` is Auto).
+
+- **Auto (the default):** one job per 4 physical cores and per 8 GB of memory, whichever is fewer, and at least one. 8 cores and 32 GB give 2. A build already uses every thread by itself, and the linker and a test browser take a few GB each, so more runners than that make every job slower. Too many runners can also starve the runners' own connection, and GitHub then fails the jobs with "The self-hosted runner lost communication with the server". The number is in the menu item and in `agent.log`.
+- **By hand:** up to the physical cores (logical threads do not count). A higher number in the config file is lowered, with a message.
 
 - **More runners:** the agent registers the new ones in the background with your `gh`. They get the same repository and labels as the first runner, and are named `<first runner's name>-2`, `-3`, and so on.
 - **Fewer runners:** the extra ones are removed from GitHub as soon as they are free; one in the middle of a job finishes it first. Their files stay, so adding them back skips the download.

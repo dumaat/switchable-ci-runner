@@ -101,12 +101,12 @@ pub fn wide(s: &str) -> Vec<u16> {
 
 /// "Parallel jobs > Custom…": a box for the number, off the tray thread.
 /// The receiver gets what was typed; an empty text is a cancel.
-pub fn ask_parallel_jobs(current: u8, cores: usize) -> Receiver<String> {
+pub fn ask_parallel_jobs(current: u8, max: u8) -> Receiver<String> {
     let (tx, rx) = channel();
     let script = format!(
         "Add-Type -AssemblyName Microsoft.VisualBasic; \
          [Microsoft.VisualBasic.Interaction]::InputBox(\
-         'How many CI jobs may run at once on this PC? (1 to {cores}; one runner each)', \
+         'How many CI jobs may run at once on this PC? (1 to {max}, the physical cores; one runner each)', \
          'switchable-ci-runner', '{current}')"
     );
     thread::spawn(move || {

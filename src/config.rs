@@ -13,8 +13,9 @@ pub struct Config {
     pub battery_sends_to_github: bool,
     /// Hard CPU cap shared by all runners and everything their jobs start, in percent; 100 = none.
     pub cpu_limit_percent: u8,
-    /// How many jobs may run at once: one official runner per job. Kept within
-    /// 1..=cores when read (see `parallel::clamp`).
+    /// How many jobs may run at once: one official runner per job. 0 is Auto, the
+    /// number this PC's cores and memory allow (`parallel::auto_jobs`); any other
+    /// value is kept within 1..=physical cores when read (`parallel::clamp`).
     pub parallel_jobs: u8,
     /// Folder of the official GitHub runner (the one with `run.cmd`).
     pub runner_dir: PathBuf,
@@ -26,7 +27,7 @@ impl Default for Config {
             mode: Mode::Automatic,
             battery_sends_to_github: true,
             cpu_limit_percent: 100,
-            parallel_jobs: 1,
+            parallel_jobs: crate::parallel::AUTO,
             runner_dir: PathBuf::new(),
         }
     }
@@ -100,12 +101,12 @@ mod tests {
     }
 
     #[test]
-    fn a_file_from_an_older_version_gets_one_runner() {
+    fn a_file_from_an_older_version_gets_auto() {
         let path = temp_path("older");
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(&path, r#"{"mode": "Always", "cpu_limit_percent": 50}"#).unwrap();
         let config = load(&path).unwrap();
-        assert_eq!(config.parallel_jobs, 1);
+        assert_eq!(config.parallel_jobs, crate::parallel::AUTO);
         assert_eq!(config.mode, Mode::Always);
     }
 

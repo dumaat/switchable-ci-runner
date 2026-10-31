@@ -1,6 +1,6 @@
 [package]
 name = "switchable-ci-runner"
-version = "0.1.4"
+version = "0.1.5"
 edition = "2024"
 license = "MIT"
 description = "Use your own PC as a GitHub Actions self-hosted runner when it suits you, with automatic fallback to GitHub-hosted runners: a tray app that asks before running jobs while you work."
