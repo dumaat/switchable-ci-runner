@@ -1,4 +1,5 @@
-//! What the runner should be doing right now. Pure: no clock, no system calls,
+//! Whether the free runners should be online right now (a busy runner is
+//! never stopped, whatever this says; see `parallel::plan`). Pure: no clock, no system calls,
 //! so every case is a row in a table test.
 
 use serde::{Deserialize, Serialize};
@@ -26,13 +27,12 @@ pub struct Inputs {
     pub on_battery: bool,
     /// The menu option "On battery, send to GitHub".
     pub battery_sends_to_github: bool,
-    /// A job is executing on this machine right now.
-    pub job_running: bool,
-    /// The owner, while using the machine, answered "yes, run it here" to the popup.
-    pub owner_said_yes: bool,
+    /// A run this machine took (idle, Always, or the owner's "yes") is still
+    /// going: its later jobs were routed here and must find a runner.
+    pub run_taken: bool,
 }
 
-/// Whether the runner process should be up (online, takes jobs) or down.
+/// Whether the free runners should be up (online, take jobs) or down.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Wanted {
     Online,
@@ -42,23 +42,18 @@ pub enum Wanted {
 /// Why the decision came out the way it did, shown in the tray menu.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Reason {
-    JobRunning,
     Disabled,
     /// The owner chose to take every job.
     Always,
     OnBattery,
     Idle,
-    /// In use, but the owner said yes to running here.
-    OwnerSaidYes,
+    /// In use, but a run this machine took (or the owner said yes to) is still going.
+    RunTaken,
     /// In use: the agent asks before taking a job; no answer means GitHub.
     InUse,
 }
 
 pub fn decide(inputs: Inputs) -> (Wanted, Reason) {
-    // A job that already started is never cut: GitHub would mark it failed.
-    if inputs.job_running {
-        return (Wanted::Online, Reason::JobRunning);
-    }
     if inputs.mode == Mode::Disabled {
         return (Wanted::Offline, Reason::Disabled);
     }
@@ -70,8 +65,8 @@ pub fn decide(inputs: Inputs) -> (Wanted, Reason) {
     }
     if inputs.idle_for >= IDLE_THRESHOLD {
         (Wanted::Online, Reason::Idle)
-    } else if inputs.owner_said_yes {
-        (Wanted::Online, Reason::OwnerSaidYes)
+    } else if inputs.run_taken {
+        (Wanted::Online, Reason::RunTaken)
     } else {
         (Wanted::Offline, Reason::InUse)
     }
@@ -85,29 +80,28 @@ mod tests {
     const JUST_UNDER: Duration = Duration::from_secs(5 * 60 - 1);
     const IDLE: Duration = Duration::from_secs(5 * 60);
 
-    fn inputs(mode: Mode, idle_for: Duration, on_battery: bool, option: bool, job: bool) -> Inputs {
+    fn inputs(mode: Mode, idle_for: Duration, on_battery: bool, option: bool) -> Inputs {
         Inputs {
             mode,
             idle_for,
             on_battery,
             battery_sends_to_github: option,
-            job_running: job,
-            owner_said_yes: false,
+            run_taken: false,
         }
     }
 
     fn said_yes(mode: Mode, idle_for: Duration, on_battery: bool, option: bool) -> Inputs {
         Inputs {
-            owner_said_yes: true,
-            ..inputs(mode, idle_for, on_battery, option, false)
+            run_taken: true,
+            ..inputs(mode, idle_for, on_battery, option)
         }
     }
 
     #[test]
-    fn yes_runs_here_while_in_use() {
+    fn a_taken_run_keeps_runners_online_while_in_use() {
         assert_eq!(
             decide(said_yes(Mode::Automatic, IN_USE, false, true)),
-            (Wanted::Online, Reason::OwnerSaidYes)
+            (Wanted::Online, Reason::RunTaken)
         );
     }
 
@@ -126,24 +120,24 @@ mod tests {
     #[test]
     fn always_takes_jobs_while_in_use_but_respects_the_battery_option() {
         assert_eq!(
-            decide(inputs(Mode::Always, IN_USE, false, true, false)),
+            decide(inputs(Mode::Always, IN_USE, false, true)),
             (Wanted::Online, Reason::Always)
         );
         assert_eq!(
-            decide(inputs(Mode::Always, IN_USE, true, false, false)),
+            decide(inputs(Mode::Always, IN_USE, true, false)),
             (Wanted::Online, Reason::Always)
         );
         assert_eq!(
-            decide(inputs(Mode::Always, IN_USE, true, true, false)),
+            decide(inputs(Mode::Always, IN_USE, true, true)),
             (Wanted::Offline, Reason::OnBattery)
         );
     }
 
     #[test]
     fn no_answer_while_in_use_stays_offline() {
-        // The popup timing out or "no" both leave owner_said_yes false.
+        // The popup timing out or "no" both leave run_taken false.
         assert_eq!(
-            decide(inputs(Mode::Automatic, IN_USE, false, true, false)),
+            decide(inputs(Mode::Automatic, IN_USE, false, true)),
             (Wanted::Offline, Reason::InUse)
         );
     }
@@ -154,26 +148,22 @@ mod tests {
         use Reason as R;
         use Wanted::*;
         let table = [
-            // mode, idle, battery, option, job -> wanted, reason
-            (Automatic, IDLE, false, true, false, Online, R::Idle),
-            (Automatic, JUST_UNDER, false, true, false, Offline, R::InUse),
-            (Automatic, IN_USE, false, true, false, Offline, R::InUse),
-            (Automatic, IDLE, true, true, false, Offline, R::OnBattery),
-            (Automatic, IDLE, true, false, false, Online, R::Idle),
-            (Automatic, IN_USE, true, false, false, Offline, R::InUse),
-            (Disabled, IDLE, false, true, false, Offline, R::Disabled),
-            (Disabled, IDLE, false, false, false, Offline, R::Disabled),
-            // A running job keeps the runner up whatever else changed.
-            (Automatic, IN_USE, false, true, true, Online, R::JobRunning),
-            (Automatic, IDLE, true, true, true, Online, R::JobRunning),
-            (Disabled, IN_USE, false, true, true, Online, R::JobRunning),
+            // mode, idle, battery, option -> wanted, reason
+            (Automatic, IDLE, false, true, Online, R::Idle),
+            (Automatic, JUST_UNDER, false, true, Offline, R::InUse),
+            (Automatic, IN_USE, false, true, Offline, R::InUse),
+            (Automatic, IDLE, true, true, Offline, R::OnBattery),
+            (Automatic, IDLE, true, false, Online, R::Idle),
+            (Automatic, IN_USE, true, false, Offline, R::InUse),
+            (Disabled, IDLE, false, true, Offline, R::Disabled),
+            (Disabled, IDLE, false, false, Offline, R::Disabled),
         ];
-        for (mode, idle, battery, option, job, wanted, reason) in table {
-            let got = decide(inputs(mode, idle, battery, option, job));
+        for (mode, idle, battery, option, wanted, reason) in table {
+            let got = decide(inputs(mode, idle, battery, option));
             assert_eq!(
                 got,
                 (wanted, reason),
-                "{mode:?} idle={idle:?} battery={battery} option={option} job={job}"
+                "{mode:?} idle={idle:?} battery={battery} option={option}"
             );
         }
     }

@@ -11,8 +11,11 @@ use std::path::{Path, PathBuf};
 pub struct Config {
     pub mode: Mode,
     pub battery_sends_to_github: bool,
-    /// Hard CPU cap for the runner and everything a job starts, in percent; 100 = none.
+    /// Hard CPU cap shared by all runners and everything their jobs start, in percent; 100 = none.
     pub cpu_limit_percent: u8,
+    /// How many jobs may run at once: one official runner per job. Kept within
+    /// 1..=cores when read (see `parallel::clamp`).
+    pub parallel_jobs: u8,
     /// Folder of the official GitHub runner (the one with `run.cmd`).
     pub runner_dir: PathBuf,
 }
@@ -23,6 +26,7 @@ impl Default for Config {
             mode: Mode::Automatic,
             battery_sends_to_github: true,
             cpu_limit_percent: 100,
+            parallel_jobs: 1,
             runner_dir: PathBuf::new(),
         }
     }
@@ -88,10 +92,21 @@ mod tests {
             mode: Mode::Disabled,
             battery_sends_to_github: false,
             cpu_limit_percent: 50,
+            parallel_jobs: 4,
             runner_dir: PathBuf::from(r"C:\runner"),
         };
         save(&path, &config).unwrap();
         assert_eq!(load(&path).unwrap(), config);
+    }
+
+    #[test]
+    fn a_file_from_an_older_version_gets_one_runner() {
+        let path = temp_path("older");
+        fs::create_dir_all(path.parent().unwrap()).unwrap();
+        fs::write(&path, r#"{"mode": "Always", "cpu_limit_percent": 50}"#).unwrap();
+        let config = load(&path).unwrap();
+        assert_eq!(config.parallel_jobs, 1);
+        assert_eq!(config.mode, Mode::Always);
     }
 
     #[test]

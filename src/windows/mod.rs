@@ -1,35 +1,36 @@
 //! The Windows agent: every few seconds, read idle time and power, decide,
-//! and start or stop the runner. Between ticks, keep the tray responsive.
+//! and start or stop the runners (one per job that may run at once).
+//! Between ticks, keep the tray responsive.
 
 mod ask;
 mod install;
 mod job;
 mod pat;
+mod pool;
 mod runner;
 mod sys;
 mod tray;
 
-use runner::Runner;
+use pool::{Pool, Summary};
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::Receiver;
 use std::thread::sleep;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 use switchable_ci_runner::config::{self, Config};
 use switchable_ci_runner::decision::{Inputs, Reason, Wanted, decide};
+use switchable_ci_runner::parallel;
+use switchable_ci_runner::runs::Runs;
 use tray::{Action, Tray};
 
 const TICK: Duration = Duration::from_secs(5);
 const PUMP: Duration = Duration::from_millis(100);
-/// After a "yes", how long the runner stays up waiting for the job to arrive.
-const YES_WINDOW: Duration = Duration::from_secs(10 * 60);
 
 pub struct Paths {
     pub data: PathBuf,
     pub config: PathBuf,
     pub agent_log: PathBuf,
-    pub runner_log: PathBuf,
     pub runner_dir: PathBuf,
     pub installed_exe: PathBuf,
 }
@@ -44,7 +45,6 @@ pub fn paths() -> Result<Paths, String> {
             .join("switchable-ci-runner")
             .join("config.json"),
         agent_log: data.join("agent.log"),
-        runner_log: data.join("runner.log"),
         runner_dir: data.join("runner"),
         installed_exe: data.join("bin").join("switchable-ci-runner.exe"),
         data,
@@ -53,8 +53,14 @@ pub fn paths() -> Result<Paths, String> {
 
 /// Started from anywhere but the install folder, the program installs itself
 /// and hands over to the installed copy; started from there, it is the agent.
+/// `--uninstall`, from anywhere, undoes the install.
 pub fn main() -> Result<(), String> {
     let paths = paths()?;
+    if std::env::args().any(|a| a == "--uninstall") {
+        let text = install::uninstall(&paths)?;
+        tray::message("switchable-ci-runner", &text, false);
+        return Ok(());
+    }
     let me = std::env::current_exe().map_err(|e| format!("cannot find myself: {e}"))?;
     if !same_file(&me, &paths.installed_exe) {
         return install::install(&paths, &me);
@@ -70,23 +76,52 @@ fn same_file(a: &Path, b: &Path) -> bool {
     }
 }
 
-/// The question in flight and the "yes" that is still valid.
+/// The repository's runs, and the question in flight about some of them.
 struct Asking {
     repo: Option<String>,
-    new_runs: Option<Receiver<u64>>,
+    snapshots: Option<Receiver<Vec<u64>>>,
+    runs: Runs,
     answer: Option<Receiver<bool>>,
-    yes_until: Option<Instant>,
+    asked: Vec<u64>,
 }
 
-fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
-    let mut config = config::load(&paths.config).map_err(|e| e.to_string())?;
+/// The config as the owner left it, with `parallel_jobs` kept within the cores.
+/// A value outside is logged and shown, never silently turned into zero.
+fn checked(mut config: Config, paths: &Paths, cores: usize, log: &dyn Fn(&str)) -> Config {
     if config.runner_dir.as_os_str().is_empty() {
         config.runner_dir = paths.runner_dir.clone();
     }
-    let log = |line: &str| append_log(&paths.agent_log, line);
-    log("agent started");
+    let (n, warning) = parallel::clamp(config.parallel_jobs, cores);
+    if let Some(w) = warning {
+        log(&w);
+        tray::notify("switchable-ci-runner", &w, true);
+    }
+    config.parallel_jobs = n;
+    config
+}
 
-    let tray = Tray::new(&config)?;
+fn modified(path: &Path) -> Option<SystemTime> {
+    fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
+    let log = |line: &str| append_log(&paths.agent_log, line);
+    let cores = std::thread::available_parallelism()
+        .map(|n| n.get())
+        .unwrap_or(1);
+    let mut config = checked(
+        config::load(&paths.config).map_err(|e| e.to_string())?,
+        paths,
+        cores,
+        &log,
+    );
+    let mut stamp = modified(&paths.config);
+    log(&format!(
+        "agent started ({} parallel jobs, {cores} cores)",
+        config.parallel_jobs
+    ));
+
+    let tray = Tray::new(&config, cores)?;
     let repo = install::runner_repo(&config.runner_dir);
     if just_installed {
         tray::notify(
@@ -102,13 +137,19 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
             false,
         );
     }
-    let mut runner = Runner::new(config.runner_dir.clone(), paths.runner_log.clone());
+    let mut pool = Pool::new(
+        config.runner_dir.clone(),
+        paths.data.clone(),
+        config.cpu_limit_percent,
+    )?;
     let mut asking = Asking {
-        new_runs: repo.clone().map(ask::watch_runs),
+        snapshots: repo.clone().map(ask::watch_runs),
         repo,
+        runs: Runs::default(),
         answer: None,
-        yes_until: None,
+        asked: Vec::new(),
     };
+    let mut custom_box: Option<Receiver<String>> = None;
     let mut last_tick: Option<Instant> = None;
 
     loop {
@@ -118,24 +159,55 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
             match action {
                 Action::SetMode(mode) => config.mode = mode,
                 Action::SetBatterySendsToGithub(on) => config.battery_sends_to_github = on,
-                Action::SetCpuLimit(percent) => config.cpu_limit_percent = percent,
+                Action::SetCpuLimit(percent) => {
+                    config.cpu_limit_percent = percent;
+                    if let Err(e) = pool.set_cpu_cap(percent) {
+                        log(&e);
+                    }
+                }
+                Action::SetParallelJobs(n) => config.parallel_jobs = n,
+                Action::AskParallelJobs => {
+                    if custom_box.is_none() {
+                        custom_box = Some(ask::ask_parallel_jobs(config.parallel_jobs, cores));
+                    }
+                    // The click toggled the checkmark; the number decides it.
+                    tray.sync(&config);
+                    continue;
+                }
                 Action::SetPat => {
                     set_pat_in_background(asking.repo.clone());
                     continue;
                 }
                 Action::Quit => {
                     log("quit from the menu");
-                    runner.stop();
+                    pool.stop_all();
                     sys::keep_awake(false);
                     return Ok(());
                 }
             }
             changed = true;
         }
-        if changed && let Err(e) = config::save(&paths.config, &config) {
-            log(&format!("cannot save config: {e}"));
+        if let Some(rx) = &custom_box
+            && let Ok(text) = rx.try_recv()
+        {
+            custom_box = None;
+            match parallel::parse_custom(&text, cores) {
+                Ok(Some(n)) => {
+                    config.parallel_jobs = n;
+                    changed = true;
+                }
+                Ok(None) => {}
+                Err(e) => tray::notify("switchable-ci-runner", &e, true),
+            }
         }
-        // An answer acts at once, not at the next tick: the CI router is waiting.
+        if changed {
+            tray.sync(&config);
+            if let Err(e) = config::save(&paths.config, &config) {
+                log(&format!("cannot save config: {e}"));
+            }
+            stamp = modified(&paths.config);
+        }
+        // An answer acts at once, not at the next tick: the CI route step is waiting.
         if let Some(rx) = &asking.answer
             && let Ok(yes) = rx.try_recv()
         {
@@ -146,43 +218,68 @@ fn run(paths: &Paths, just_installed: bool) -> Result<(), String> {
                 "owner said no or did not answer"
             });
             if yes {
-                asking.yes_until = Some(Instant::now() + YES_WINDOW);
+                asking.runs.take(&asking.asked);
             }
+            asking.asked.clear();
             changed = true;
         }
-        if changed || last_tick.is_none_or(|t| t.elapsed() >= TICK) {
-            tick(&config, &mut runner, &mut asking, &tray, &log);
+        let due = last_tick.is_none_or(|t| t.elapsed() >= TICK);
+        if due && modified(&paths.config) != stamp {
+            stamp = modified(&paths.config);
+            if reload(paths, cores, &mut config, &pool, &tray, &log) {
+                changed = true;
+            }
+        }
+        if changed || due {
+            tick(&config, &mut pool, &mut asking, &tray, &log);
             last_tick = Some(Instant::now());
         }
         sleep(PUMP);
     }
 }
 
-fn tick(
-    config: &Config,
-    runner: &mut Runner,
-    asking: &mut Asking,
+/// The owner edited config.json by hand: it wins, as a menu click would.
+/// A file that does not parse keeps the settings in use, with a message.
+fn reload(
+    paths: &Paths,
+    cores: usize,
+    config: &mut Config,
+    pool: &Pool,
     tray: &Tray,
     log: &dyn Fn(&str),
-) {
-    // Runs that started since the last tick; drained every time so none is asked about late.
-    let new_runs = asking
-        .new_runs
-        .as_ref()
-        .map(|rx| rx.try_iter().count())
-        .unwrap_or(0);
-    if !runner.is_installed() {
-        tray.show(
-            &format!("Runner not configured in {}", runner.dir().display()),
-            None,
-        );
-        return;
+) -> bool {
+    match config::load(&paths.config) {
+        Ok(new) => {
+            let new = checked(new, paths, cores, log);
+            if new.cpu_limit_percent != config.cpu_limit_percent
+                && let Err(e) = pool.set_cpu_cap(new.cpu_limit_percent)
+            {
+                log(&e);
+            }
+            *config = Config {
+                runner_dir: config.runner_dir.clone(),
+                ..new
+            };
+            tray.sync(config);
+            log("config file changed: reloaded");
+            true
+        }
+        Err(e) => {
+            let text = format!("{e}; keeping the previous settings");
+            log(&text);
+            tray::notify("switchable-ci-runner", &text, true);
+            false
+        }
     }
-    let alive = runner.is_alive();
-    let job_running = alive && runner::job_running();
-    if job_running {
-        // The job the "yes" was for has arrived; the next one gets its own question.
-        asking.yes_until = None;
+}
+
+fn tick(config: &Config, pool: &mut Pool, asking: &mut Asking, tray: &Tray, log: &dyn Fn(&str)) {
+    // Runs that started since the last tick; drained every time so none is asked about late.
+    let mut new_runs = Vec::new();
+    if let Some(rx) = &asking.snapshots {
+        for active in rx.try_iter() {
+            new_runs.extend(asking.runs.update(&active));
+        }
     }
     let inputs = Inputs {
         mode: config.mode,
@@ -190,46 +287,59 @@ fn tick(
         idle_for: sys::idle_for().unwrap_or(Duration::ZERO),
         on_battery: sys::on_battery().unwrap_or(true),
         battery_sends_to_github: config.battery_sends_to_github,
-        job_running,
-        owner_said_yes: asking.yes_until.is_some_and(|t| Instant::now() < t),
+        run_taken: asking.runs.any_taken(),
     };
     let (wanted, reason) = decide(inputs);
-    if reason == Reason::InUse
-        && new_runs > 0
-        && asking.answer.is_none()
-        && let Some(repo) = &asking.repo
-    {
-        log("new run while in use: asking");
-        asking.answer = Some(ask::ask(repo));
-    }
-    match (wanted, alive) {
-        (Wanted::Online, false) => match runner.start(config.cpu_limit_percent) {
-            Ok(()) => log(&format!("runner started ({reason:?})")),
-            Err(e) => {
-                log(&e);
-                tray.show(&format!("Cannot start the runner: {e}"), None);
-                return;
+    if !new_runs.is_empty() {
+        if wanted == Wanted::Online {
+            // The route step sees free runners: these runs come here, all their jobs.
+            asking.runs.take(&new_runs);
+        } else if reason == Reason::InUse
+            && let Some(repo) = &asking.repo
+        {
+            asking.asked.extend(&new_runs);
+            if asking.answer.is_none() {
+                log("new run while in use: asking");
+                asking.answer = Some(ask::ask(repo));
             }
-        },
-        (Wanted::Offline, true) => {
-            runner.stop();
-            log(&format!("runner stopped ({reason:?})"));
         }
-        _ => {}
     }
-    sys::keep_awake(job_running);
-    tray.show(status_line(reason), Some(reason));
+    let summary = pool.tick(
+        usize::from(config.parallel_jobs),
+        wanted == Wanted::Online,
+        log,
+    );
+    if !summary.configured {
+        tray.show(
+            &format!("Runner not configured in {}", config.runner_dir.display()),
+            None,
+            false,
+        );
+        return;
+    }
+    // A job anywhere keeps the PC awake; a busy runner is never stopped (`parallel::plan`).
+    sys::keep_awake(summary.busy > 0);
+    tray.show(
+        &status_line(reason, summary),
+        Some(reason),
+        summary.busy > 0,
+    );
 }
 
-fn status_line(reason: Reason) -> &'static str {
-    match reason {
-        Reason::JobRunning => "Running a job",
+fn status_line(reason: Reason, summary: Summary) -> String {
+    let base = match reason {
         Reason::Idle => "Online: taking jobs (idle)",
-        Reason::OwnerSaidYes => "Online: you said yes",
+        Reason::RunTaken => "Online: finishing a run this PC took",
         Reason::Always => "Online: taking every job (Always)",
         Reason::InUse => "You are using the PC: I ask before each run",
         Reason::OnBattery => "Offline: on battery; jobs go to GitHub",
         Reason::Disabled => "Disabled: jobs go to GitHub",
+    };
+    match (summary.busy, summary.wanted) {
+        (0, 1) => base.to_string(),
+        (0, n) => format!("{base} ({n} runners)"),
+        (1, 1) => format!("Running a job · {base}"),
+        (b, n) => format!("Running {b} of {n} jobs · {base}"),
     }
 }
 

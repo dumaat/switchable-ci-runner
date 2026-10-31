@@ -16,6 +16,12 @@ inputs:
   wait-seconds:
     description: How long to wait for your machine (the popup lasts 45 s).
     default: "90"
+  min-free:
+    description: >
+      How many free runners your machine must have before jobs go there. With
+      parallel jobs, set it to the jobs this run starts at once (a matrix of 4: "4")
+      so the run never waits on fewer runners than it needs.
+    default: "1"
 outputs:
   runner:
     description: JSON for runs-on, e.g. ["self-hosted","switchable"] or "windows-latest".
@@ -30,6 +36,7 @@ runs:
         LABEL: ${{ inputs.label }}
         FALLBACK: ${{ inputs.fallback }}
         WAIT: ${{ inputs.wait-seconds }}
+        MIN_FREE: ${{ inputs.min-free }}
       run: |
         set -euo pipefail
         free() {
@@ -40,13 +47,13 @@ runs:
         deadline=$(( $(date +%s) + WAIT ))
         while :; do
           n=$(free || echo 0)
-          if [ "$n" -gt 0 ]; then
+          if [ "$n" -ge "$MIN_FREE" ] && [ "$n" -gt 0 ]; then
             echo "runner=$(jq -cn --arg l "$LABEL" '["self-hosted", $l]')" >> "$GITHUB_OUTPUT"
-            echo "Your machine is free: jobs run there."
+            echo "Your machine has $n free runner(s): jobs run there."
             exit 0
           fi
           [ "$(date +%s)" -ge "$deadline" ] && break
           sleep 5
         done
         echo "runner=$FALLBACK" >> "$GITHUB_OUTPUT"
-        echo "Your machine did not come online in ${WAIT}s: jobs go to GitHub."
+        echo "Your machine did not have $MIN_FREE free runner(s) in ${WAIT}s: jobs go to GitHub."

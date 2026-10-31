@@ -4,13 +4,18 @@
 //! Steps: refuse to run elevated; ask which repository; download the official
 //! GitHub runner and check its SHA-256; register it with the label `switchable`
 //! using the owner's `gh`; copy this program to %LOCALAPPDATA%; start it at logon.
+//!
+//! The installer sets up runner 1. When the owner asks for more parallel jobs,
+//! the agent adds runners 2, 3, ... the same way (`add_runner`), with runner 1's
+//! repository and labels, and removes the extra ones when asked for fewer.
 
 use super::Paths;
 use sha2::{Digest, Sha256};
 use std::fs;
 use std::os::windows::process::CommandExt;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use switchable_ci_runner::parallel::{slot_dir, slot_index, slot_name};
 use windows_sys::Win32::System::Threading::{CREATE_NO_WINDOW, DETACHED_PROCESS};
 
 pub const LABEL: &str = "switchable";
@@ -26,8 +31,13 @@ pub fn install(paths: &Paths, me: &Path) -> Result<(), String> {
     })?;
     if runner_repo(&paths.runner_dir).is_none() {
         let repo = ask_repo()?;
-        download_runner(paths)?;
-        register_runner(paths, &repo)?;
+        let zip = runner_zip(&paths.data)?;
+        extract(&zip, &paths.runner_dir)?;
+        let name = format!(
+            "{LABEL}-{}",
+            std::env::var("COMPUTERNAME").unwrap_or_else(|_| "pc".into())
+        );
+        configure(&paths.runner_dir, &repo, &name, LABEL)?;
     }
     stop_old_agent();
     let bin = paths
@@ -58,12 +68,17 @@ pub fn install(paths: &Paths, me: &Path) -> Result<(), String> {
     Ok(())
 }
 
-/// The repository the runner is registered to, from the runner's own `.runner` file.
-pub fn runner_repo(runner_dir: &Path) -> Option<String> {
+/// A field of the runner's own `.runner` file (JSON, with a byte-order mark).
+fn runner_field(runner_dir: &Path, field: &str) -> Option<String> {
     let text = fs::read_to_string(runner_dir.join(".runner")).ok()?;
     let value: serde_json::Value =
         serde_json::from_str(text.trim_start_matches('\u{feff}')).ok()?;
-    let url = value.get("gitHubUrl")?.as_str()?;
+    Some(value.get(field)?.as_str()?.to_string())
+}
+
+/// The repository the runner is registered to, from the runner's own `.runner` file.
+pub fn runner_repo(runner_dir: &Path) -> Option<String> {
+    let url = runner_field(runner_dir, "gitHubUrl")?;
     let repo = url
         .trim_end_matches('/')
         .strip_prefix("https://github.com/")?;
@@ -102,7 +117,9 @@ fn ask_repo() -> Result<String, String> {
     Ok(repo)
 }
 
-fn download_runner(paths: &Paths) -> Result<(), String> {
+/// The latest official runner zip, downloaded once and checked against the
+/// SHA-256 in its release notes; later runners reuse the checked file.
+fn runner_zip(data: &Path) -> Result<PathBuf, String> {
     let tag = gh(&[
         "api",
         "repos/actions/runner/releases/latest",
@@ -110,6 +127,13 @@ fn download_runner(paths: &Paths) -> Result<(), String> {
         ".tag_name",
     ])?;
     let version = tag.trim().trim_start_matches('v').to_string();
+    let dir = data.join("download");
+    let name = format!("actions-runner-win-x64-{version}.zip");
+    let zip = dir.join(&name);
+    // Only a file that passed the check is ever renamed to this name.
+    if zip.is_file() {
+        return Ok(zip);
+    }
     let notes = gh(&[
         "api",
         &format!("repos/actions/runner/releases/tags/{}", tag.trim()),
@@ -119,10 +143,7 @@ fn download_runner(paths: &Paths) -> Result<(), String> {
     let expected = published_sha(&notes)
         .ok_or_else(|| format!("no win-x64 SHA-256 in the runner {version} release notes"))?;
 
-    let dir = paths.data.join("download");
     fs::create_dir_all(&dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
-    let name = format!("actions-runner-win-x64-{version}.zip");
-    let zip = dir.join(&name);
     let part = dir.join(format!("{name}.part"));
     let url = format!("https://github.com/actions/runner/releases/download/v{version}/{name}");
     run_quiet(
@@ -138,8 +159,11 @@ fn download_runner(paths: &Paths) -> Result<(), String> {
         ));
     }
     fs::rename(&part, &zip).map_err(|e| format!("cannot keep the download: {e}"))?;
-    fs::create_dir_all(&paths.runner_dir)
-        .map_err(|e| format!("cannot create {}: {e}", paths.runner_dir.display()))?;
+    Ok(zip)
+}
+
+fn extract(zip: &Path, dir: &Path) -> Result<(), String> {
+    fs::create_dir_all(dir).map_err(|e| format!("cannot create {}: {e}", dir.display()))?;
     // Windows' own tar (bsdtar) reads zip files.
     run_quiet(
         "tar",
@@ -147,7 +171,7 @@ fn download_runner(paths: &Paths) -> Result<(), String> {
             "-xf",
             &zip.display().to_string(),
             "-C",
-            &paths.runner_dir.display().to_string(),
+            &dir.display().to_string(),
         ],
     )
 }
@@ -163,7 +187,7 @@ fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn register_runner(paths: &Paths, repo: &str) -> Result<(), String> {
+fn configure(dir: &Path, repo: &str, name: &str, labels: &str) -> Result<(), String> {
     let token = gh(&[
         "api",
         "-X",
@@ -175,10 +199,6 @@ fn register_runner(paths: &Paths, repo: &str) -> Result<(), String> {
     .map_err(|e| {
         format!("cannot get a registration token for {repo} (are you an admin of it?): {e}")
     })?;
-    let name = format!(
-        "{LABEL}-{}",
-        std::env::var("COMPUTERNAME").unwrap_or_else(|_| "pc".into())
-    );
     let status = Command::new("cmd")
         .args([
             "/C",
@@ -189,14 +209,15 @@ fn register_runner(paths: &Paths, repo: &str) -> Result<(), String> {
             "--token",
             token.trim(),
             "--name",
-            &name,
+            name,
             "--labels",
-            LABEL,
+            labels,
             "--work",
             "_work",
+            // A runner of the same name left on GitHub (a crash, a reinstall) is taken over.
             "--replace",
         ])
-        .current_dir(&paths.runner_dir)
+        .current_dir(dir)
         .creation_flags(CREATE_NO_WINDOW)
         .status()
         .map_err(|e| format!("cannot run config.cmd: {e}"))?;
@@ -204,6 +225,128 @@ fn register_runner(paths: &Paths, repo: &str) -> Result<(), String> {
         Ok(())
     } else {
         Err(format!("config.cmd failed ({status})"))
+    }
+}
+
+/// Adds runner `k` next to runner 1: same repository, same custom labels (an
+/// older install may use its own label), name `<runner 1's name>-k`.
+pub fn add_runner(data: &Path, first: &Path, dir: &Path, k: usize) -> Result<(), String> {
+    let repo = runner_repo(first).ok_or("runner 1 is not registered to a repository")?;
+    let first_name = runner_field(first, "agentName").ok_or("runner 1 has no name")?;
+    let labels = custom_labels(&repo, &first_name).unwrap_or_else(|| LABEL.to_string());
+    if !dir.join("bin").join("Runner.Listener.exe").is_file() {
+        let zip = runner_zip(data)?;
+        extract(&zip, dir)?;
+    }
+    configure(dir, &repo, &slot_name(&first_name, k), &labels)
+}
+
+/// The labels a runner was registered with, minus the ones GitHub adds itself.
+fn custom_labels(repo: &str, name: &str) -> Option<String> {
+    let safe = |c: char| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.');
+    if !name.chars().all(safe) {
+        return None;
+    }
+    let jq = format!(
+        r#".runners[] | select(.name == "{name}") | .labels[] | select(.type == "custom") | .name"#
+    );
+    let out = gh(&[
+        "api",
+        "--paginate",
+        &format!("repos/{repo}/actions/runners"),
+        "--jq",
+        &jq,
+    ])
+    .ok()?;
+    let labels: Vec<&str> = out
+        .lines()
+        .map(str::trim)
+        .filter(|l| !l.is_empty())
+        .collect();
+    (!labels.is_empty()).then(|| labels.join(","))
+}
+
+/// Unregisters a runner from GitHub. The files stay, so adding it back later
+/// skips the download.
+pub fn remove_runner(dir: &Path) -> Result<(), String> {
+    let repo = runner_repo(dir).ok_or("the runner is not registered to a repository")?;
+    let token = gh(&[
+        "api",
+        "-X",
+        "POST",
+        &format!("repos/{repo}/actions/runners/remove-token"),
+        "--jq",
+        ".token",
+    ])?;
+    let status = Command::new("cmd")
+        .args(["/C", "config.cmd", "remove", "--token", token.trim()])
+        .current_dir(dir)
+        .creation_flags(CREATE_NO_WINDOW)
+        .status()
+        .map_err(|e| format!("cannot run config.cmd: {e}"))?;
+    if status.success() {
+        Ok(())
+    } else {
+        Err(format!("config.cmd remove failed ({status})"))
+    }
+}
+
+/// The configured runner folders next to runner 1, by slot number.
+pub fn runner_slots(first: &Path) -> Vec<usize> {
+    let (Some(parent), Some(base)) = (first.parent(), first.file_name()) else {
+        return Vec::new();
+    };
+    let base = base.to_string_lossy();
+    let Ok(entries) = fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let mut ks: Vec<usize> = entries
+        .filter_map(Result::ok)
+        .filter(|e| e.path().join(".runner").is_file())
+        .filter_map(|e| slot_index(&base, &e.file_name().to_string_lossy()))
+        .collect();
+    ks.sort_unstable();
+    ks
+}
+
+/// `switchable-ci-runner.exe --uninstall`: stops the agent and its runners,
+/// removes it from startup, and unregisters every runner from GitHub.
+/// The files stay in %LOCALAPPDATA%\switchable-ci-runner.
+pub fn uninstall(paths: &Paths) -> Result<String, String> {
+    stop_old_agent();
+    let _ = run_quiet(
+        "reg",
+        &[
+            "delete",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "switchable-ci-runner",
+            "/f",
+        ],
+    );
+    let slots = runner_slots(&paths.runner_dir);
+    let errors: Vec<String> = slots
+        .iter()
+        .map(|&k| slot_dir(&paths.runner_dir, k))
+        .filter_map(|dir| {
+            remove_runner(&dir)
+                .err()
+                .map(|e| format!("{}: {e}", dir.display()))
+        })
+        .collect();
+    if errors.is_empty() {
+        Ok(format!(
+            "Uninstalled: {} runner(s) removed from GitHub, and it no longer starts with Windows.\n\n\
+             The files stay in {}; delete the folder by hand if you want them gone.",
+            slots.len(),
+            paths.data.display()
+        ))
+    } else {
+        Err(format!(
+            "Stopped and removed from startup, but some runners could not be removed from \
+             GitHub (remove them in the repository's Settings > Actions > Runners):\n{}",
+            errors.join("\n")
+        ))
     }
 }
 
@@ -293,5 +436,26 @@ mod tests {
         )
         .unwrap();
         assert_eq!(runner_repo(&dir).as_deref(), Some("octo-org/octo-repo"));
+    }
+
+    #[test]
+    fn finds_only_configured_runner_folders() {
+        let data = std::env::temp_dir().join(format!("scr-slots-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&data);
+        for (folder, configured) in [
+            ("runner", true),
+            ("runner-2", false),
+            ("runner-3", true),
+            ("runner-x", true),
+            ("download", true),
+        ] {
+            let dir = data.join(folder);
+            fs::create_dir_all(&dir).unwrap();
+            if configured {
+                fs::write(dir.join(".runner"), "{}").unwrap();
+            }
+        }
+        assert_eq!(runner_slots(&data.join("runner")), vec![1, 3]);
+        let _ = fs::remove_dir_all(&data);
     }
 }

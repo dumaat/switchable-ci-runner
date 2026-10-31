@@ -2,7 +2,6 @@
 //! The watcher lists the repository's active runs with the owner's `gh`; the
 //! question is a message box that closes itself after 45 s, and no answer means GitHub.
 
-use std::collections::HashSet;
 use std::os::windows::process::CommandExt;
 use std::process::Command;
 use std::sync::mpsc::{Receiver, channel};
@@ -29,21 +28,17 @@ unsafe extern "system" {
     ) -> i32;
 }
 
-/// Ids of runs that became active after the agent started. Runs already
-/// active at start are not asked about: they were routed before we existed.
-pub fn watch_runs(repo: String) -> Receiver<u64> {
+/// The ids of the repository's active runs, a fresh list every poll. Which
+/// ones are new, and which ones this machine took, is `runs::Runs`'s job.
+pub fn watch_runs(repo: String) -> Receiver<Vec<u64>> {
     let (tx, rx) = channel();
     thread::spawn(move || {
-        let mut seen = HashSet::new();
-        let mut first = true;
         loop {
-            if let Some(ids) = active_runs(&repo) {
-                for id in ids {
-                    if seen.insert(id) && !first && tx.send(id).is_err() {
-                        return;
-                    }
-                }
-                first = false;
+            // A failed poll sends nothing: the last list stays the agent's view.
+            if let Some(ids) = active_runs(&repo)
+                && tx.send(ids).is_err()
+            {
+                return;
             }
             thread::sleep(POLL);
         }
@@ -55,7 +50,7 @@ fn active_runs(repo: &str) -> Option<Vec<u64>> {
     let out = Command::new("gh")
         .args([
             "api",
-            &format!("repos/{repo}/actions/runs?per_page=10"),
+            &format!("repos/{repo}/actions/runs?per_page=30"),
             "--jq",
             r#".workflow_runs[] | select(.status=="queued" or .status=="in_progress") | .id"#,
         ])
@@ -102,4 +97,26 @@ pub fn ask(repo: &str) -> Receiver<bool> {
 
 pub fn wide(s: &str) -> Vec<u16> {
     s.encode_utf16().chain(std::iter::once(0)).collect()
+}
+
+/// "Parallel jobs > Custom…": a box for the number, off the tray thread.
+/// The receiver gets what was typed; an empty text is a cancel.
+pub fn ask_parallel_jobs(current: u8, cores: usize) -> Receiver<String> {
+    let (tx, rx) = channel();
+    let script = format!(
+        "Add-Type -AssemblyName Microsoft.VisualBasic; \
+         [Microsoft.VisualBasic.Interaction]::InputBox(\
+         'How many CI jobs may run at once on this PC? (1 to {cores}; one runner each)', \
+         'switchable-ci-runner', '{current}')"
+    );
+    thread::spawn(move || {
+        let text = Command::new("powershell")
+            .args(["-NoProfile", "-Command", &script])
+            .creation_flags(CREATE_NO_WINDOW)
+            .output()
+            .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+            .unwrap_or_default();
+        let _ = tx.send(text);
+    });
+    rx
 }

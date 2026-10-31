@@ -1,8 +1,8 @@
 //! The tray icon and its menu. No window: the menu is the whole interface.
 
 use switchable_ci_runner::config::Config;
-use switchable_ci_runner::cpu;
 use switchable_ci_runner::decision::{Mode, Reason};
+use switchable_ci_runner::{cpu, parallel};
 use tray_icon::menu::{
     CheckMenuItem, Menu, MenuEvent, MenuId, MenuItem, PredefinedMenuItem, Submenu,
 };
@@ -12,6 +12,9 @@ pub enum Action {
     SetMode(Mode),
     SetBatterySendsToGithub(bool),
     SetCpuLimit(u8),
+    SetParallelJobs(u8),
+    /// "Custom…": the agent opens the number box.
+    AskParallelJobs,
     SetPat,
     Quit,
 }
@@ -24,12 +27,15 @@ pub struct Tray {
     disabled: CheckMenuItem,
     battery: CheckMenuItem,
     cpu: Vec<(u8, CheckMenuItem)>,
+    parallel: Vec<(u8, CheckMenuItem)>,
+    custom: CheckMenuItem,
     pat: MenuId,
     quit: MenuId,
 }
 
 impl Tray {
-    pub fn new(config: &Config) -> Result<Self, String> {
+    /// `cores` limits the quick choices for parallel jobs; "Custom…" goes up to it too.
+    pub fn new(config: &Config, cores: usize) -> Result<Self, String> {
         let (mode, battery_sends_to_github) = (config.mode, config.battery_sends_to_github);
         let status = MenuItem::new("Starting…", false, None);
         let automatic = CheckMenuItem::new(
@@ -56,7 +62,10 @@ impl Tray {
             battery_sends_to_github,
             None,
         );
-        let cpu_menu = Submenu::new("CPU limit (jobs always run at the lowest priority)", true);
+        let cpu_menu = Submenu::new(
+            "CPU limit for all jobs (they always run at the lowest priority)",
+            true,
+        );
         let mut cpu = Vec::new();
         for percent in cpu::CHOICES {
             let label = if percent == 100 {
@@ -70,6 +79,27 @@ impl Tray {
                 .map_err(|e| format!("tray menu: {e}"))?;
             cpu.push((percent, item));
         }
+        let parallel_menu = Submenu::new("Parallel jobs (one runner each)", true);
+        let mut parallel = Vec::new();
+        for n in parallel::CHOICES
+            .into_iter()
+            .filter(|&n| usize::from(n) <= cores.max(1))
+        {
+            let label = if n == 1 {
+                "1 (one job at a time)".to_string()
+            } else {
+                n.to_string()
+            };
+            let item = CheckMenuItem::new(label, true, false, None);
+            parallel_menu
+                .append(&item)
+                .map_err(|e| format!("tray menu: {e}"))?;
+            parallel.push((n, item));
+        }
+        let custom = CheckMenuItem::new("Custom…", true, false, None);
+        parallel_menu
+            .append_items(&[&PredefinedMenuItem::separator(), &custom])
+            .map_err(|e| format!("tray menu: {e}"))?;
         let pat = MenuItem::new("Set CI token (PAT)…", true, None);
         let quit = MenuItem::new("Quit", true, None);
 
@@ -83,6 +113,7 @@ impl Tray {
             &PredefinedMenuItem::separator(),
             &battery,
             &cpu_menu,
+            &parallel_menu,
             &PredefinedMenuItem::separator(),
             &pat,
             &PredefinedMenuItem::separator(),
@@ -97,7 +128,7 @@ impl Tray {
             .build()
             .map_err(|e| format!("tray icon: {e}"))?;
 
-        Ok(Tray {
+        let tray = Tray {
             icon,
             status,
             automatic,
@@ -105,12 +136,37 @@ impl Tray {
             disabled,
             battery,
             cpu,
+            parallel,
+            custom,
             pat: pat.id().clone(),
             quit: quit.id().clone(),
-        })
+        };
+        tray.sync(config);
+        Ok(tray)
     }
 
-    /// Menu clicks since the last call, as actions; the checkmarks are kept consistent here.
+    /// Every checkmark from the config: after a menu click, and after the
+    /// owner edited the config file by hand.
+    pub fn sync(&self, config: &Config) {
+        self.show_mode(config.mode);
+        self.battery.set_checked(config.battery_sends_to_github);
+        for (p, item) in &self.cpu {
+            item.set_checked(*p == config.cpu_limit_percent);
+        }
+        let n = config.parallel_jobs;
+        let quick = self.parallel.iter().any(|(c, _)| *c == n);
+        for (c, item) in &self.parallel {
+            item.set_checked(*c == n);
+        }
+        self.custom.set_checked(!quick);
+        self.custom.set_text(if quick {
+            "Custom…".to_string()
+        } else {
+            format!("Custom ({n})…")
+        });
+    }
+
+    /// Menu clicks since the last call, as actions; the agent calls `sync` after applying them.
     pub fn actions(&self) -> Vec<Action> {
         let mut actions = Vec::new();
         while let Ok(event) = MenuEvent::receiver().try_recv() {
@@ -126,11 +182,11 @@ impl Tray {
             } else if event.id == *self.battery.id() {
                 actions.push(Action::SetBatterySendsToGithub(self.battery.is_checked()));
             } else if let Some((percent, _)) = self.cpu.iter().find(|(_, i)| *i.id() == event.id) {
-                let percent = *percent;
-                for (p, item) in &self.cpu {
-                    item.set_checked(*p == percent);
-                }
-                actions.push(Action::SetCpuLimit(percent));
+                actions.push(Action::SetCpuLimit(*percent));
+            } else if let Some((n, _)) = self.parallel.iter().find(|(_, i)| *i.id() == event.id) {
+                actions.push(Action::SetParallelJobs(*n));
+            } else if event.id == *self.custom.id() {
+                actions.push(Action::AskParallelJobs);
             } else if event.id == self.pat {
                 actions.push(Action::SetPat);
             } else if event.id == self.quit {
@@ -146,14 +202,15 @@ impl Tray {
         self.disabled.set_checked(mode == Mode::Disabled);
     }
 
-    pub fn show(&self, line: &str, reason: Option<Reason>) {
+    /// `busy`: some runner is running a job (blue, whatever the reason).
+    pub fn show(&self, line: &str, reason: Option<Reason>, busy: bool) {
         self.status.set_text(line);
         let _ = self
             .icon
             .set_tooltip(Some(format!("switchable-ci-runner: {line}")));
         let color = match reason {
-            Some(Reason::JobRunning) => Color::Blue,
-            Some(Reason::Idle) | Some(Reason::OwnerSaidYes) | Some(Reason::Always) => Color::Green,
+            _ if busy => Color::Blue,
+            Some(Reason::Idle) | Some(Reason::RunTaken) | Some(Reason::Always) => Color::Green,
             Some(Reason::InUse) => Color::Yellow,
             Some(Reason::Disabled) | Some(Reason::OnBattery) | None => Color::Gray,
         };
@@ -196,6 +253,12 @@ fn dot(color: Color) -> Result<Icon, String> {
 
 /// A message box that does not block the tray: it runs on its own thread.
 pub fn notify(title: &str, text: &str, error: bool) {
+    let (title, text) = (title.to_string(), text.to_string());
+    std::thread::spawn(move || message(&title, &text, error));
+}
+
+/// A message box that waits for OK.
+pub fn message(title: &str, text: &str, error: bool) {
     use windows_sys::Win32::UI::WindowsAndMessaging::{
         MB_ICONERROR, MB_ICONINFORMATION, MB_OK, MB_SETFOREGROUND, MB_TOPMOST, MessageBoxW,
     };
@@ -205,15 +268,13 @@ pub fn notify(title: &str, text: &str, error: bool) {
     } else {
         MB_ICONINFORMATION
     };
-    std::thread::spawn(move || {
-        // SAFETY: both strings are NUL-terminated UTF-16 owned by this thread.
-        unsafe {
-            MessageBoxW(
-                std::ptr::null_mut(),
-                text.as_ptr(),
-                title.as_ptr(),
-                MB_OK | icon | MB_TOPMOST | MB_SETFOREGROUND,
-            );
-        }
-    });
+    // SAFETY: both strings are NUL-terminated UTF-16 that outlive the call.
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            text.as_ptr(),
+            title.as_ptr(),
+            MB_OK | icon | MB_TOPMOST | MB_SETFOREGROUND,
+        );
+    }
 }

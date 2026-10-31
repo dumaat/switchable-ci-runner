@@ -8,9 +8,10 @@ Use it if you want to:
 - use your laptop or desktop as a GitHub Actions runner without jobs getting stuck when it is off, asleep or busy;
 - save GitHub Actions minutes on private repositories (Windows minutes count double);
 - get "self-hosted runner, otherwise `ubuntu-latest`/`windows-latest`" in `runs-on`, which GitHub does not offer natively;
-- run CI on your own PC at the lowest priority, with a CPU cap, so it never slows you down.
+- run CI on your own PC at the lowest priority, with a CPU cap, so it never slows you down;
+- run several jobs at once on a machine with many cores (one runner per job).
 
-> Status: v0.1.3, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
+> Status: v0.1.4, Windows. Linux comes next. Design: [docs/design.md](docs/design.md).
 
 ## Install (Windows)
 
@@ -24,13 +25,16 @@ The icon sits in the tray (bottom right; click the ^ arrow if it is hidden). Its
 |---|---|
 | **Automatic** / **Always** / **Disabled** | The mode (table below). |
 | **On battery, send jobs to GitHub** | On battery, jobs go to GitHub in any mode. |
-| **CPU limit** → 25 / 50 / 75 / 100% | Hard cap on the CPU the runner and everything a job starts can use. Applies from the next runner start, never mid-job. |
+| **CPU limit for all jobs** → 25 / 50 / 75 / 100% | Hard cap on the CPU that all runners and everything their jobs start can use, together. Applies at once, to running jobs too. |
+| **Parallel jobs** → 1 / 2 / 4 / 8 / Custom… | How many jobs may run at once, one runner each ([below](#parallel-jobs)). Custom… takes any number up to your logical cores. |
 | **Set CI token (PAT)…** | Saves the token the route step needs (below). |
-| **Quit** | Stops the runner and the agent until the next logon. |
+| **Quit** | Stops the runners and the agent until the next logon. |
 
 CI jobs **always run at the lowest Windows priority** ("Idle"): whatever you are doing comes first, and when the PC is idle the CI still gets the whole CPU. The CPU limit is an extra, hard cap on top.
 
-Settings: `%APPDATA%\switchable-ci-runner\config.json`. Files and logs: `%LOCALAPPDATA%\switchable-ci-runner`. To update, run a newer .exe: it replaces the installed one and keeps your settings and runner. Uninstall: `scripts\uninstall-windows.ps1 -Repo owner/name`.
+Settings: `%APPDATA%\switchable-ci-runner\config.json` (`mode`, `battery_sends_to_github`, `cpu_limit_percent`, `parallel_jobs`). You can edit it by hand: the agent reloads it within 5 s, and a file that does not parse keeps the current settings and shows a message. Files and logs: `%LOCALAPPDATA%\switchable-ci-runner` (`agent.log`, `runner.log`, `runner-2.log`, ...). To update, run a newer .exe: it replaces the installed one and keeps your settings and runners.
+
+Uninstall: `"%LOCALAPPDATA%\switchable-ci-runner\bin\switchable-ci-runner.exe" --uninstall` (or `scripts\uninstall-windows.ps1 -Repo owner/name`). It unregisters every runner from GitHub and leaves the files in place.
 
 ## Why
 
@@ -41,10 +45,12 @@ GitHub-hosted runners are slow for heavy builds, and on free accounts private-re
 | Mode (tray menu) | What happens |
 |---|---|
 | **Automatic**, idle ≥ 5 min | Your machine runs every job that arrives. |
-| **Automatic**, in use | A window asks "Run its jobs on this PC?". Yes → here. No, or no answer in 45 s → GitHub. |
+| **Automatic**, in use | A window asks "Run its jobs on this PC?". Yes → the whole run here. No, or no answer in 45 s → GitHub. |
 | **Always** | Every job runs here, idle or not, without asking. |
 | **Disabled** | Never runs; everything goes to GitHub. |
 | *Option:* **On battery, send jobs to GitHub** | On battery, jobs go to GitHub in any mode. |
+
+A run your machine took keeps the runners online until it ends, even if you come back to the PC. Its later jobs (a matrix, or a job that `needs` another) were routed here when the run started, and they must find a runner.
 
 It is meant for students and small teams who have a capable machine but not a big GitHub plan. **Linux is a first-class target**, alongside Windows.
 
@@ -63,18 +69,39 @@ jobs:
       runner: ${{ steps.route.outputs.runner }}
     steps:
       - id: route
-        uses: dumaat/switchable-ci-runner@v0.1.3
+        uses: dumaat/switchable-ci-runner@v0.1.4
         with:
           token: ${{ secrets.RUNNER_STATUS_TOKEN }}   # can list the repo's runners
           fallback: '"windows-latest"'
           # label: switchable      # the label your runner was registered with
           # wait-seconds: 90       # how long to wait for your answer
+          # min-free: 1            # free runners needed (parallel jobs: the run's width)
   build:
     needs: route
     runs-on: ${{ fromJSON(needs.route.outputs.runner) }}
 ```
 
 Known cost: when your machine is off, disabled or you say no, the route step waits the full 90 s before falling back.
+
+## Parallel jobs
+
+One official runner runs one job at a time. To run several jobs at once, the agent keeps several runners: `runner`, `runner-2`, `runner-3`, ... in `%LOCALAPPDATA%\switchable-ci-runner`, each with its own work folder. Set the number in **Parallel jobs**, or with `parallel_jobs` in the config file.
+
+- **More runners:** the agent registers the new ones in the background with your `gh`. They get the same repository and labels as the first runner, and are named `<first runner's name>-2`, `-3`, and so on.
+- **Fewer runners:** the extra ones are removed from GitHub as soon as they are free; one in the middle of a job finishes it first. Their files stay, so adding them back skips the download.
+- **Never mid-job:** whatever the mode or the number, a runner running a job is never stopped.
+- **CPU:** all runners share one job object, so the Idle priority and the CPU limit cover all of them together.
+- **Routing:** with `min-free`, the route step sends a run here only if that many runners are free (for a matrix of 4, use `min-free: 4`). Two runs that start at the same moment can both see the same free runners. The extra jobs then wait here for a runner instead of going to GitHub.
+
+The agent cannot handle these for you:
+
+- **Single-instance tools and fixed paths.** Jobs running at the same time share the machine: a program that allows only one instance (a CAD tool, an emulator), a fixed port, a fixed temp file or output folder. Serialize those jobs in the workflow with [`concurrency`](https://docs.github.com/actions/writing-workflows/choosing-what-your-workflow-does/control-the-concurrency-of-workflows-and-jobs):
+  ```yaml
+  cad-export:
+    concurrency: { group: cad-tool, cancel-in-progress: false }
+  ```
+- **Caches.** Each runner has its own work folder, so the first job on each one builds from scratch, and each takes its own disk space (a Rust `target/` can take several GB). Tool caches in your user profile (`~/.cargo`, `~/.rustup`, npm) are shared. They lock themselves, so jobs wait for each other there instead of breaking.
+- **Memory.** N jobs need N times the RAM, and the CPU limit does not cover memory.
 
 ## The CI token (PAT)
 
@@ -101,6 +128,9 @@ In Automatic mode it asks first. Jobs always run at the Idle priority class, wit
 
 **Does it work on Linux or macOS?**
 Windows today; Linux is the next target. The route step runs on any GitHub-hosted runner.
+
+**Can it run several jobs at the same time?**
+Yes: set **Parallel jobs** in the tray, one runner per job. See [Parallel jobs](#parallel-jobs).
 
 **Is it safe for public repositories?**
 Only if no outside pull request can run workflows on it. See Security.
